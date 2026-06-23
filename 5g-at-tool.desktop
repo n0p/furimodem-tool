@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=5G AT Tool
+GenericName=Modem AT Command Tool
+Comment=Send AT commands to a 5G modem through oFono (FuriLabs AT)
+Exec=python3 /home/furios/5g-at-tool.py
+Icon=5g-at-tool
+Terminal=false
+Categories=Network;TelephonyTools;Utility;
+Keywords=modem;5g;ofono;at;5g-at-tool;dbus;cell;signal;
+StartupNotify=true
+StartupWMClass=es.n0p.fiveg_at_tool
