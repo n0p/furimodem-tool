@@ -51,6 +51,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._history_pos = 0
         self._cell_meas_status = False
         self._cell_meas_raw = ""
+        self._neighbor_cells: list[dict] = []
 
         self.log_buffer = Gtk.TextBuffer()
         for name, fg, weight in (
@@ -200,6 +201,65 @@ class MainWindow(Adw.ApplicationWindow):
         signal_group.add(refresh_sig_btn)
         page.add(signal_group)
 
+        cell_group = Adw.PreferencesGroup()
+        cell_group.set_title("Serving Cell (AT+ECELL)")
+        cell_grid, self._cell_labels = self._make_prop_grid(
+            ("Status", "RAT", "ARFCN", "PCI",
+             "RSRP (dBm)", "RSRQ (dB)", "SNR (dB)", "Cell ID",
+             "PLMNs", "Band"),
+        )
+        cell_row = Adw.ActionRow()
+        cell_row.set_activatable_widget(cell_grid)
+        cell_row.add_suffix(cell_grid)
+        cell_group.add(cell_row)
+        cell_btns = (
+            ("Start meas", self._on_start_cell_meas),
+            ("Stop meas", self._on_stop_cell_meas),
+            ("Refresh cell", self._refresh_cell_meas),
+        )
+        flow = Gtk.FlowBox()
+        flow.set_max_children_per_line(4)
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_column_spacing(6)
+        flow.set_row_spacing(6)
+        flow.set_homogeneous(True)
+        for label, handler in cell_btns:
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.connect("clicked", handler)
+            flow.append(btn)
+        btn_row = Adw.ActionRow()
+        btn_row.set_activatable_widget(flow)
+        btn_row.add_suffix(flow)
+        cell_group.add(btn_row)
+        page.add(cell_group)
+
+        neighbor_group = Adw.PreferencesGroup()
+        neighbor_group.set_title("Neighbouring Cells")
+        neighbor_group.set_description("Refresh cell info above first")
+        neighbor_stack = Adw.ViewStack()
+        neighbor_stack.set_vexpand(False)
+        self._neighbor_stack = neighbor_stack
+        neighbor_switcher = Adw.ViewSwitcherBar()
+        neighbor_switcher.set_stack(neighbor_stack)
+        neighbor_switcher.set_reveal(True)
+        ns_row = Adw.ActionRow()
+        ns_row.set_activatable_widget(neighbor_stack)
+        ns_row.add_suffix(neighbor_stack)
+        neighbor_group.add(ns_row)
+        ns_sw_row = Adw.ActionRow()
+        ns_sw_row.set_activatable_widget(neighbor_switcher)
+        ns_sw_row.add_suffix(neighbor_switcher)
+        neighbor_group.add(ns_sw_row)
+        refresh_neighbor_btn = Gtk.Button(label="Refresh neighbours")
+        refresh_neighbor_btn.set_halign(Gtk.Align.START)
+        refresh_neighbor_btn.connect("clicked", self._refresh_neighbor_cells)
+        rn_row = Adw.ActionRow()
+        rn_row.set_activatable_widget(refresh_neighbor_btn)
+        rn_row.add_suffix(refresh_neighbor_btn)
+        neighbor_group.add(rn_row)
+        page.add(neighbor_group)
+
         modem_group = Adw.PreferencesGroup()
         modem_group.set_title("Identifiers")
         self._info_long_rows: dict[str, Adw.ActionRow] = {}
@@ -269,11 +329,21 @@ class MainWindow(Adw.ApplicationWindow):
             ("CEREG?", self._make_preset_handler("AT+CEREG?")),
             ("C5GREG?", self._make_preset_handler("AT+C5GREG?")),
             ("GCAP", self._make_preset_handler("AT+GCAP")),
-            ("QENG", self._make_preset_handler('AT+QENG="servingcell"')),
-            ("QCAINFO", self._make_preset_handler("AT+QCAINFO")),
             ("ECID", self._make_preset_handler("AT+ECID")),
             ("CGATT?", self._make_preset_handler("AT+CGATT?")),
             ("CPIN?", self._make_preset_handler("AT+CPIN?")),
+            ("EXOPL", self._make_preset_handler("AT+EXOPL")),
+            ("EPRATL", self._make_preset_handler("AT+EPRATL?")),
+            ("E5GOPT?", self._make_preset_handler("AT+E5GOPT?")),
+            ("ERAT?", self._make_preset_handler("AT+ERAT?")),
+            ("ECAINFO", self._make_preset_handler("AT+ECAINFO?")),
+            ("ENRCABAND", self._make_preset_handler("AT+ENRCABAND?")),
+            ("ECCAUSE", self._make_preset_handler("AT+ECCAUSE?")),
+            ("EONS?", self._make_preset_handler("AT+EONS?")),
+            ("ELCE?", self._make_preset_handler("AT+ELCE?")),
+            ("ECELCK?", self._make_preset_handler("AT+ECELCK?")),
+            ("EPOF", self._make_preset_handler("AT+EPOF")),
+            ("ESLP?", self._make_preset_handler("AT+ESLP?")),
         )
         flow = Gtk.FlowBox()
         flow.set_max_children_per_line(4)
@@ -347,37 +417,6 @@ class MainWindow(Adw.ApplicationWindow):
         gnss_group.add(flow)
         page.add(gnss_group)
 
-        cell_group = Adw.PreferencesGroup()
-        cell_group.set_title("Cell measurement (AT+ECELLMEAS)")
-        cell_group.set_description("LTE/NR serving + neighbour cell info")
-        cell_grid, self._cell_labels = self._make_prop_grid(
-            ("Status", "RAT", "ARFCN", "PCI",
-             "RSRP (dBm)", "RSRQ (dB)", "SNR (dB)", "Cell ID",
-             "PLMNs", "Band"),
-        )
-        cell_group.add(cell_grid)
-        cell_btns = (
-            ("Start meas", self._on_start_cell_meas),
-            ("Stop meas", self._on_stop_cell_meas),
-            ("Refresh cell", self._refresh_cell_meas),
-            ("Cell ID?", self._make_preset_handler("AT+ECELLID?")),
-            ("Cell ID on", self._make_preset_handler("AT+ECELLID=1")),
-            ("Cell ID off", self._make_preset_handler("AT+ECELLID=0")),
-        )
-        flow = Gtk.FlowBox()
-        flow.set_max_children_per_line(4)
-        flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_column_spacing(6)
-        flow.set_row_spacing(6)
-        flow.set_homogeneous(True)
-        for label, handler in cell_btns:
-            btn = Gtk.Button(label=label)
-            btn.add_css_class("flat")
-            btn.connect("clicked", handler)
-            flow.append(btn)
-        cell_group.add(flow)
-        page.add(cell_group)
-
         pos_group = Adw.PreferencesGroup()
         pos_group.set_title("Geolocation (AT+EIMSGEO)")
         pos_group.set_description("Modem-based geolocation via WiFi/cell DB")
@@ -407,6 +446,45 @@ class MainWindow(Adw.ApplicationWindow):
         page.add(pos_group)
 
         return page
+
+    @staticmethod
+    def _ecell_rat_str(act: int | None) -> str:
+        m = {7: "LTE", 11: "NR", 13: "LTE (ENDC)", 256: "C2K"}
+        return m.get(act, str(act)) if act is not None else "-"
+
+    @staticmethod
+    def _ecell_rsrp_str(c: dict) -> str:
+        act = c.get("act")
+        sig1 = c.get("sig1")
+        sig1_dbm = c.get("sig1_in_dbm")
+        if sig1 is None:
+            return "-"
+        if act in (7,):  # LTE: 3GPP index 0-97
+            if 0 <= sig1 <= 97:
+                return f"{sig1 - 141:.0f}"
+            return str(sig1)
+        if act in (11, 13):  # NR: SS-RSRP quarter-dBm
+            return f"{sig1 / 4:.1f}"
+        if act in (2, 4, 5, 6):  # UMTS: RSCP 0-96
+            if 0 <= sig1 <= 96:
+                return f"{sig1 - 121:.0f}"
+            return str(sig1)
+        return str(sig1_dbm) if sig1_dbm is not None else str(sig1)
+
+    @staticmethod
+    def _ecell_rsrq_str(c: dict) -> str:
+        act = c.get("act")
+        sig2 = c.get("sig2")
+        sig2_dbm = c.get("sig2_in_dbm")
+        if sig2 is None:
+            return "-"
+        if act in (7,):  # LTE: RSRQ 0-34 -> -19.5 to -3 dB
+            if 0 <= sig2 <= 34:
+                return f"{sig2 / 2.0 - 19.5:.1f}"
+            return str(sig2)
+        if act in (11, 13):  # NR: SS-RSRQ quarter-dBm
+            return f"{sig2 / 4:.1f}"
+        return str(sig2_dbm) if sig2_dbm is not None else str(sig2)
 
     def _log(self, text: str, tag: str | None = None) -> None:
         end = self.log_buffer.get_end_iter()
@@ -598,22 +676,64 @@ class MainWindow(Adw.ApplicationWindow):
         if not cells:
             self._log("[AT] ECELL: no data", "err")
             return
+        self._neighbor_cells = cells[1:] if len(cells) > 1 else []
+        self._log(f"[AT] ECELL: {len(cells)} cells ({len(self._neighbor_cells)} neighbours)", "info")
+        try:
+            self._refresh_neighbor_cells()
+        except Exception as e:
+            self._log(f"[UI] neighbor update failed: {e}", "err")
         c = cells[0]
-        rat_map = {7: "LTE", 11: "NR", 13: "LTE (ENDC)", 256: "C2K"}
-        rat = c.get("act")
         cl = self._cell_labels
         cl["Status"].set_text("ok")
-        cl["RAT"].set_text(rat_map.get(rat, str(rat)) if rat is not None else "-")
+        cl["RAT"].set_text(self._ecell_rat_str(c.get("act")))
         cl["ARFCN"].set_text(str(c.get("psc_or_pci", "-")))
         cl["PCI"].set_text("-")
-        cl["RSRP (dBm)"].set_text(
-            str(c.get("sig1_in_dbm", "-")) if c.get("sig1_in_dbm") is not None else "-")
-        cl["RSRQ (dB)"].set_text(
-            str(c.get("sig2_in_dbm", "-")) if c.get("sig2_in_dbm") is not None else "-")
+        cl["RSRP (dBm)"].set_text(self._ecell_rsrp_str(c))
+        cl["RSRQ (dB)"].set_text(self._ecell_rsrq_str(c))
         cl["SNR (dB)"].set_text("-")
         cl["Cell ID"].set_text(str(c.get("cid", "-")))
         cl["PLMNs"].set_text(f"{c.get('mcc', '?')}/{c.get('mnc', '?')}")
         cl["Band"].set_text("-")
+
+    def _build_neighbor_page(self, idx: int, cell: dict) -> Gtk.Box:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        group = Adw.PreferencesGroup()
+        group.set_title(f"Neighbour #{idx + 1}")
+        grid, labels = self._make_prop_grid(
+            ("RAT", "ARFCN/PCI", "Cell ID", "MCC/MNC",
+             "RSRP (dBm)", "RSRQ (dB)"),
+        )
+        labels["RAT"].set_text(self._ecell_rat_str(cell.get("act")))
+        labels["ARFCN/PCI"].set_text(str(cell.get("psc_or_pci", "-")))
+        labels["Cell ID"].set_text(str(cell.get("cid", "-")))
+        labels["MCC/MNC"].set_text(f"{cell.get('mcc', '?')}/{cell.get('mnc', '?')}")
+        labels["RSRP (dBm)"].set_text(self._ecell_rsrp_str(cell))
+        labels["RSRQ (dB)"].set_text(self._ecell_rsrq_str(cell))
+        gr = Adw.ActionRow()
+        gr.set_activatable_widget(grid)
+        gr.add_suffix(grid)
+        group.add(gr)
+        box.append(group)
+        return box
+
+    def _rebuild_neighbor_stack(self) -> None:
+        pages = self._neighbor_stack.get_pages()
+        while pages.get_n_items() > 0:
+            page = pages.get_item(0)
+            child = page.get_child()
+            self._neighbor_stack.remove(child)
+
+    def _refresh_neighbor_cells(self, _btn=None) -> None:
+        self._rebuild_neighbor_stack()
+        if not self._neighbor_cells:
+            lbl = Gtk.Label(label="No neighbour data — refresh cell on Status tab first")
+            lbl.set_margin_top(16)
+            lbl.set_margin_bottom(16)
+            self._neighbor_stack.add_titled(lbl, "none", "-")
+            return
+        for i, cell in enumerate(self._neighbor_cells):
+            page = self._build_neighbor_page(i, cell)
+            self._neighbor_stack.add_titled(page, f"neighbor_{i}", f"#{i + 1}")
 
     def _on_get_geolocation(self, _btn=None) -> None:
         if not self.modem:
