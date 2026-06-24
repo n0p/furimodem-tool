@@ -26,7 +26,7 @@ def parse_cesq(text: str) -> dict:
     The first six values follow 3GPP TS 27.007.
     """
     out: dict = {}
-    m = re.search(r"\+EC?SQ:\s*([\d,]+)", text or "")
+    m = re.search(r"\+(?:CESQ|ECSQ):\s*([\d,\-]+)", text or "")
     if not m:
         return out
     vals = m.group(1).split(",")

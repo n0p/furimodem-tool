@@ -1,4 +1,4 @@
-"""Adw/GTK4 UI for 5G Modem AT Tool.
+"""Adw/GTK4 UI for FuriModem Tool.
 
 Layout: Adw.OverlaySplitView with a sidebar (modem selector, log, history)
 and a content area with an Adw.ViewStack (Status, Positioning, Terminal).
@@ -25,9 +25,11 @@ from ofono import (
 )
 from parsers import (
     ACCESS_TECH,
+    CEREG_STATUS,
     parse_cereg,
     parse_cesq,
     parse_ecell,
+    parse_eimsgeo,
 )
 
 
@@ -38,7 +40,7 @@ POLL_INTERVAL_S = 2
 
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
-        super().__init__(application=app, title="5G Modem AT Tool (oFono)")
+        super().__init__(application=app, title="FuriModem Tool")
         self.set_default_size(1100, 760)
 
         self.bus = dbus.SystemBus()
@@ -48,6 +50,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._command_history: deque[str] = deque(maxlen=HISTORY_MAX)
         self._history_pos = 0
         self._cell_meas_status = False
+        self._cell_meas_raw = ""
 
         self.log_buffer = Gtk.TextBuffer()
         for name, fg, weight in (
@@ -114,7 +117,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        title = Adw.WindowTitle.new("5G Modem AT Tool", self._subtitle_text())
+        title = Adw.WindowTitle.new("FuriModem Tool", self._subtitle_text())
         header.set_title_widget(title)
         self._title = title
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
@@ -152,48 +155,65 @@ class MainWindow(Adw.ApplicationWindow):
         modem_group.add(self._modem_combo)
         box.append(modem_group)
 
+    @staticmethod
+    def _make_prop_grid(keys: tuple[str, ...], cols: int = 2) -> tuple[Gtk.Grid, dict[str, Gtk.Label]]:
+        grid = Gtk.Grid()
+        grid.set_column_spacing(16)
+        grid.set_row_spacing(4)
+        grid.set_margin_top(8)
+        grid.set_margin_bottom(4)
+        grid.set_margin_start(8)
+        grid.set_margin_end(8)
+        labels: dict[str, Gtk.Label] = {}
+        for i, key in enumerate(keys):
+            col = i % cols
+            row_pos = i // cols
+            lbl_key = Gtk.Label(label=key)
+            lbl_key.set_halign(Gtk.Align.START)
+            lbl_key.add_css_class("caption")
+            lbl_key.set_opacity(0.7)
+            lbl_val = Gtk.Label(label="-")
+            lbl_val.set_halign(Gtk.Align.END)
+            lbl_val.set_margin_start(8)
+            labels[key] = lbl_val
+            grid.attach(lbl_key, col * 2, row_pos, 1, 1)
+            grid.attach(lbl_val, col * 2 + 1, row_pos, 1, 1)
+        return grid, labels
+
     def _build_status_page(self) -> Adw.PreferencesPage:
         page = Adw.PreferencesPage()
         page.set_title("Status")
 
-        modem_group = Adw.PreferencesGroup()
-        modem_group.set_title("Modem")
-        self._info_rows: dict[str, Adw.ActionRow] = {}
-        for key in (
-            "Manufacturer", "Model", "Revision", "IMEI", "IMSI",
-            "Online", "Powered", "Type", "Operator", "Registration",
-            "Tech", "Strength",
-        ):
-            row = Adw.ActionRow()
-            row.set_title(key)
-            row.set_subtitle("-")
-            self._info_rows[key] = row
-            modem_group.add(row)
-        refresh_info_row = Adw.ButtonRow()
-        refresh_info_row.set_title("Refresh modem info")
-        refresh_info_row.connect("activated", lambda *_: self._refresh_info())
-        modem_group.add(refresh_info_row)
-        page.add(modem_group)
-
         signal_group = Adw.PreferencesGroup()
-        signal_group.set_title("5G Signal (AT+CESQ + AT+CEREG)")
+        signal_group.set_title("Network & Signal")
         signal_group.set_description("Auto-refresh every 2 s")
-        self._signal_rows: dict[str, Adw.ActionRow] = {}
-        for key in (
-            "RAT", "MCC/MNC", "TAC", "Cell ID",
-            "RSRP (dBm)", "RSRQ (dB)", "RSSI (dBm)", "SINR (dB)",
-            "RXLEV", "RSCP (dBm)", "ECNO (dB)",
-        ):
+        sig_grid, self._sig_labels = self._make_prop_grid(
+            ("Registration", "RAT", "Operator", "MCC/MNC", "TAC", "Cell ID",
+             "Strength", "Online", "Powered", "Tech",
+             "RSRP (dBm)", "RSRQ (dB)", "RSSI (dBm)", "SINR (dB)",
+             "RXLEV", "RSCP (dBm)", "ECNO (dB)"),
+        )
+        signal_group.add(sig_grid)
+        refresh_sig_btn = Gtk.Button(label="Refresh signal")
+        refresh_sig_btn.set_halign(Gtk.Align.START)
+        refresh_sig_btn.connect("clicked", lambda *_: self._refresh_signal_info())
+        signal_group.add(refresh_sig_btn)
+        page.add(signal_group)
+
+        modem_group = Adw.PreferencesGroup()
+        modem_group.set_title("Identifiers")
+        self._info_long_rows: dict[str, Adw.ActionRow] = {}
+        for key in ("Revision", "IMEI", "IMSI"):
             row = Adw.ActionRow()
             row.set_title(key)
             row.set_subtitle("-")
-            self._signal_rows[key] = row
-            signal_group.add(row)
-        refresh_sig_row = Adw.ButtonRow()
-        refresh_sig_row.set_title("Refresh signal now")
-        refresh_sig_row.connect("activated", lambda *_: self._refresh_signal_info())
-        signal_group.add(refresh_sig_row)
-        page.add(signal_group)
+            self._info_long_rows[key] = row
+            modem_group.add(row)
+        refresh_info_btn = Gtk.Button(label="Refresh modem info")
+        refresh_info_btn.set_halign(Gtk.Align.START)
+        refresh_info_btn.connect("clicked", lambda *_: self._refresh_info())
+        modem_group.add(refresh_info_btn)
+        page.add(modem_group)
 
         return page
 
@@ -216,44 +236,57 @@ class MainWindow(Adw.ApplicationWindow):
         self._timeout_row.set_adjustment(Gtk.Adjustment.new(10, 1, 600, 1, 10, 0))
         cmd_group.add(self._timeout_row)
 
-        send_row = Adw.ButtonRow()
-        send_row.set_title("Send")
-        send_row.connect("activated", self._on_send)
-        cmd_group.add(send_row)
-
-        clear_row = Adw.ButtonRow()
-        clear_row.set_title("Clear log")
-        clear_row.connect("activated", lambda *_: self.log_buffer.set_text("", -1))
-        cmd_group.add(clear_row)
-
+        action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        action_box.set_margin_top(8)
+        action_box.set_margin_bottom(8)
+        send_btn = Gtk.Button(label="Send")
+        send_btn.add_css_class("suggested-action")
+        send_btn.connect("clicked", self._on_send)
+        action_box.append(send_btn)
+        clear_btn = Gtk.Button(label="Clear log")
+        clear_btn.connect("clicked", lambda *_: self.log_buffer.set_text("", -1))
+        action_box.append(clear_btn)
+        entry = Adw.ActionRow()
+        entry.set_activatable_widget(action_box)
+        entry.set_title("Actions")
+        entry.add_suffix(action_box)
+        cmd_group.add(entry)
         page.add(cmd_group)
 
         presets_group = Adw.PreferencesGroup()
         presets_group.set_title("AT Presets")
-        for label, cmd in (
-            ("Info", "ATI"),
-            ("Manufacturer", "AT+CGMI"),
-            ("Model", "AT+CGMM"),
-            ("Firmware", "AT+CGMR"),
-            ("IMEI", "AT+CGSN"),
-            ("IMSI", "AT+CIMI"),
-            ("Operator", "AT+COPS?"),
-            ("Signal (CESQ)", "AT+CESQ"),
-            ("Signal (ECSQ)", "AT+ECSQ"),
-            ("3G/4G Reg", "AT+CREG?"),
-            ("EPS/5G Reg", "AT+CEREG?"),
-            ("5G Reg", "AT+C5GREG?"),
-            ("Capabilities", "AT+GCAP"),
-            ("QENG (Quectel)", 'AT+QENG="servingcell"'),
-            ("QCAInfo (Quectel)", "AT+QCAINFO"),
-            ("Cell ID", "AT+ECID"),
-            ("Packet Service", "AT+CGATT?"),
-            ("SIM Status", "AT+CPIN?"),
-        ):
-            row = Adw.ButtonRow()
-            row.set_title(label)
-            row.connect("activated", self._make_preset_handler(cmd))
-            presets_group.add(row)
+        presets = (
+            ("ATI", self._make_preset_handler("ATI")),
+            ("CGMI", self._make_preset_handler("AT+CGMI")),
+            ("CGMM", self._make_preset_handler("AT+CGMM")),
+            ("CGMR", self._make_preset_handler("AT+CGMR")),
+            ("CGSN", self._make_preset_handler("AT+CGSN")),
+            ("CIMI", self._make_preset_handler("AT+CIMI")),
+            ("COPS?", self._make_preset_handler("AT+COPS?")),
+            ("CESQ", self._make_preset_handler("AT+CESQ")),
+            ("ECSQ", self._make_preset_handler("AT+ECSQ")),
+            ("CREG?", self._make_preset_handler("AT+CREG?")),
+            ("CEREG?", self._make_preset_handler("AT+CEREG?")),
+            ("C5GREG?", self._make_preset_handler("AT+C5GREG?")),
+            ("GCAP", self._make_preset_handler("AT+GCAP")),
+            ("QENG", self._make_preset_handler('AT+QENG="servingcell"')),
+            ("QCAINFO", self._make_preset_handler("AT+QCAINFO")),
+            ("ECID", self._make_preset_handler("AT+ECID")),
+            ("CGATT?", self._make_preset_handler("AT+CGATT?")),
+            ("CPIN?", self._make_preset_handler("AT+CPIN?")),
+        )
+        flow = Gtk.FlowBox()
+        flow.set_max_children_per_line(4)
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_column_spacing(6)
+        flow.set_row_spacing(6)
+        flow.set_homogeneous(True)
+        for label, handler in presets:
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.connect("clicked", handler)
+            flow.append(btn)
+        presets_group.add(flow)
         page.add(presets_group)
 
         log_view = Gtk.TextView(buffer=self.log_buffer, editable=False, monospace=True,
@@ -285,65 +318,92 @@ class MainWindow(Adw.ApplicationWindow):
         page = Adw.PreferencesPage()
         page.set_title("Positioning")
 
+        gnss_group = Adw.PreferencesGroup()
+        gnss_group.set_title("GNSS Status")
+        gnss_group.set_description("GPS/GLONASS/Galileo/BeiDou receiver status")
+        gnss_grid, self._gnss_labels = self._make_prop_grid(
+            ("Source", "Fix status", "Latitude", "Longitude",
+             "Altitude (m)", "Accuracy (m)", "Sats used", "Sats tracked"),
+        )
+        gnss_group.add(gnss_grid)
+        gnss_btns = (
+            ("Start GNSS", self._make_preset_handler("AT+QGPS=1")),
+            ("Stop GNSS", self._make_preset_handler("AT+QGPS=0")),
+            ("GNSS status", self._make_preset_handler("AT+QGPS?")),
+            ("Get position", self._make_preset_handler("AT+QGPSLOC?")),
+            ("Sats in view", self._make_preset_handler("AT+QGPSGNMEA=\"GSV\"")),
+        )
+        flow = Gtk.FlowBox()
+        flow.set_max_children_per_line(4)
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_column_spacing(6)
+        flow.set_row_spacing(6)
+        flow.set_homogeneous(True)
+        for label, handler in gnss_btns:
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.connect("clicked", handler)
+            flow.append(btn)
+        gnss_group.add(flow)
+        page.add(gnss_group)
+
         cell_group = Adw.PreferencesGroup()
         cell_group.set_title("Cell measurement (AT+ECELLMEAS)")
-        cell_group.set_description(
-            "AT+ECELLMEAS – LTE/NR cell measurement\n"
-            "AT+ECELL – Get serving + neighbouring cell info\n"
-            "AT+ECELLID – Report cell ID URC"
+        cell_group.set_description("LTE/NR serving + neighbour cell info")
+        cell_grid, self._cell_labels = self._make_prop_grid(
+            ("Status", "RAT", "ARFCN", "PCI",
+             "RSRP (dBm)", "RSRQ (dB)", "SNR (dB)", "Cell ID",
+             "PLMNs", "Band"),
         )
-        self._cell_rows: dict[str, Adw.ActionRow] = {}
-        for key in (
-            "Status", "RAT", "ARFCN", "PCI",
-            "RSRP (dBm)", "RSRQ (dB)", "SNR (dB)", "Cell ID",
-            "PLMNs", "Band",
-        ):
-            row = Adw.ActionRow()
-            row.set_title(key)
-            row.set_subtitle("-")
-            self._cell_rows[key] = row
-            cell_group.add(row)
-        for label, cmd, handler in (
-            ("Start measurement", "AT+ECELLMEAS=1", self._on_start_cell_meas),
-            ("Stop measurement", "AT+ECELLMEAS=0", self._on_stop_cell_meas),
-            ("Refresh cell info", "AT+ECELL", self._refresh_cell_meas),
-            ("Cell ID URC on", "AT+ECELLID=1", self._make_preset_handler("AT+ECELLID=1")),
-            ("Cell ID URC off", "AT+ECELLID=0", self._make_preset_handler("AT+ECELLID=0")),
-            ("Cell ID query", "AT+ECELLID?", self._make_preset_handler("AT+ECELLID?")),
-        ):
-            row = Adw.ButtonRow()
-            row.set_title(label)
-            row.connect("activated", handler)
-            cell_group.add(row)
+        cell_group.add(cell_grid)
+        cell_btns = (
+            ("Start meas", self._on_start_cell_meas),
+            ("Stop meas", self._on_stop_cell_meas),
+            ("Refresh cell", self._refresh_cell_meas),
+            ("Cell ID?", self._make_preset_handler("AT+ECELLID?")),
+            ("Cell ID on", self._make_preset_handler("AT+ECELLID=1")),
+            ("Cell ID off", self._make_preset_handler("AT+ECELLID=0")),
+        )
+        flow = Gtk.FlowBox()
+        flow.set_max_children_per_line(4)
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_column_spacing(6)
+        flow.set_row_spacing(6)
+        flow.set_homogeneous(True)
+        for label, handler in cell_btns:
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.connect("clicked", handler)
+            flow.append(btn)
+        cell_group.add(flow)
         page.add(cell_group)
 
         pos_group = Adw.PreferencesGroup()
-        pos_group.set_title("Geolocation")
-        pos_group.set_description(
-            "AT+ELOCAEN – Location UI on/off\n"
-            "AT+EIMSGEO – Geolocation information"
+        pos_group.set_title("Geolocation (AT+EIMSGEO)")
+        pos_group.set_description("Modem-based geolocation via WiFi/cell DB")
+        pos_grid, self._pos_labels = self._make_prop_grid(
+            ("Status", "Method", "Latitude", "Longitude", "Altitude (m)",
+             "Accuracy (m)", "Confidence", "City", "State", "ZIP", "Country"),
         )
-        self._pos_rows: dict[str, Adw.ActionRow] = {}
-        for key in (
-            "Latitude", "Longitude", "Altitude", "Accuracy",
-            "Method", "City", "State", "ZIP", "Country",
-            "Wi-Fi MAC", "Confidence",
-        ):
-            row = Adw.ActionRow()
-            row.set_title(key)
-            row.set_subtitle("-")
-            self._pos_rows[key] = row
-            pos_group.add(row)
-        for label, cmd in (
-            ("Location UI on", "AT+ELOCAEN=1"),
-            ("Location UI off", "AT+ELOCAEN=0"),
-            ("Location UI query", "AT+ELOCAEN?"),
-            ("Geolocation info", "AT+EIMSGEO?"),
-        ):
-            row = Adw.ButtonRow()
-            row.set_title(label)
-            row.connect("activated", self._make_preset_handler(cmd))
-            pos_group.add(row)
+        pos_group.add(pos_grid)
+        pos_btns = (
+            ("Loc UI on", self._make_preset_handler("AT+ELOCAEN=1")),
+            ("Loc UI off", self._make_preset_handler("AT+ELOCAEN=0")),
+            ("Loc UI ?", self._make_preset_handler("AT+ELOCAEN?")),
+            ("Geo info", self._on_get_geolocation),
+        )
+        flow = Gtk.FlowBox()
+        flow.set_max_children_per_line(4)
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_column_spacing(6)
+        flow.set_row_spacing(6)
+        flow.set_homogeneous(True)
+        for label, handler in pos_btns:
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.connect("clicked", handler)
+            flow.append(btn)
+        pos_group.add(flow)
         page.add(pos_group)
 
         return page
@@ -408,6 +468,12 @@ class MainWindow(Adw.ApplicationWindow):
             self._log(f"[oFono] cannot open modem: {e}", "err")
         self._title.set_subtitle(self._subtitle_text())
 
+    def _set_label(self, key: str, val: str) -> None:
+        if key in self._sig_labels:
+            self._sig_labels[key].set_text(val or "-")
+        elif key in self._info_long_rows:
+            self._info_long_rows[key].set_subtitle(val or "-")
+
     def _refresh_info(self) -> None:
         if not self.modem:
             return
@@ -416,20 +482,12 @@ class MainWindow(Adw.ApplicationWindow):
         except dbus.DBusException as e:
             self._log(f"[oFono] info refresh failed: {e}", "err")
             return
-        self._set_subtitle(self._info_rows["Manufacturer"], self._fmt(info.get("manufacturer")))
-        self._set_subtitle(self._info_rows["Model"], self._fmt(info.get("model")))
-        self._set_subtitle(self._info_rows["Revision"], self._fmt(info.get("revision")))
-        self._set_subtitle(self._info_rows["IMEI"],
-                           self._fmt(info.get("imei")) or self._fmt(info.get("serial")))
-        self._set_subtitle(self._info_rows["IMSI"], self._fmt(info.get("imsi")))
-        self._set_subtitle(self._info_rows["Online"], "yes" if info.get("online") else "no")
-        self._set_subtitle(self._info_rows["Powered"], "yes" if info.get("powered") else "no")
-        self._set_subtitle(self._info_rows["Type"], self._fmt(info.get("type")))
-        self._set_subtitle(self._info_rows["Operator"], self._fmt(info.get("operator_name")))
-        self._set_subtitle(self._info_rows["Registration"], self._fmt(info.get("registration")))
-        self._set_subtitle(self._info_rows["Tech"], (info.get("technology") or "-").upper())
-        self._set_subtitle(self._info_rows["Strength"],
-                           f"{info['strength']}%" if info.get("strength") is not None else "-")
+        self._set_label("Revision", self._fmt(info.get("revision")))
+        self._set_label("IMEI", self._fmt(info.get("imei")) or self._fmt(info.get("serial")))
+        self._set_label("IMSI", self._fmt(info.get("imsi")))
+        self._set_label("Online", "yes" if info.get("online") else "no")
+        self._set_label("Powered", "yes" if info.get("powered") else "no")
+        self._set_label("Tech", (info.get("technology") or "-").upper())
 
     @staticmethod
     def _fmt(v) -> str:
@@ -438,13 +496,22 @@ class MainWindow(Adw.ApplicationWindow):
         s = str(v).strip()
         return s if s and s.lower() != "none" else ""
 
-    @staticmethod
-    def _set_subtitle(row: Adw.ActionRow, value: str) -> None:
-        row.set_subtitle(value or "-")
-
     def _refresh_signal_info(self) -> None:
         if not self.modem:
             return
+        info = self.modem.get_modem_info()
+        self._sig_labels["Operator"].set_text(self._fmt(info.get("operator_name")) or "-")
+        reg = info.get("registration") or "unknown"
+        self._sig_labels["Registration"].set_text(reg)
+        self._sig_labels["MCC/MNC"].set_text((info.get("mcc") or "?") + "/" + (info.get("mnc") or "?"))
+        self._sig_labels["Strength"].set_text(
+            f"{info['strength']}%" if info.get("strength") is not None else "-")
+
+        tech = (info.get("technology") or "").upper()
+        self._sig_labels["RAT"].set_text(tech or "-")
+        cell_id = info.get("cell_id", 0)
+        self._sig_labels["Cell ID"].set_text(str(cell_id) if cell_id else "-")
+
         try:
             raw_cesq = self.modem.command("AT+CESQ", timeout=5)
         except Exception as e:
@@ -460,26 +527,33 @@ class MainWindow(Adw.ApplicationWindow):
 
         def fmt_dbm(v):
             return f"{v:.1f}" if v is not None else "-"
-
         def fmt_db(v):
             return f"{v:.1f}" if v is not None else "-"
 
-        info = self.modem.get_modem_info()
-        rat = ACCESS_TECH.get(cereg.get("act", -1), str(cereg.get("act", "-")))
-        self._set_subtitle(self._signal_rows["RAT"], rat)
-        mcc_text = (info.get("mcc") or "?") + "/" + (info.get("mnc") or "?")
-        self._set_subtitle(self._signal_rows["MCC/MNC"], mcc_text)
-        self._set_subtitle(self._signal_rows["TAC"], self._fmt(cereg.get("tac")))
-        self._set_subtitle(self._signal_rows["Cell ID"], self._fmt(cereg.get("cell_id")))
-        self._set_subtitle(self._signal_rows["RSRP (dBm)"], fmt_dbm(cesq.get("rsrp_dbm")))
-        self._set_subtitle(self._signal_rows["RSRQ (dB)"], fmt_db(cesq.get("rsrq_db")))
-        self._set_subtitle(self._signal_rows["RSSI (dBm)"], fmt_dbm(cesq.get("rssi_dbm")))
-        self._set_subtitle(self._signal_rows["SINR (dB)"], fmt_db(cesq.get("sinr_db")))
-        self._set_subtitle(self._signal_rows["RXLEV"],
-                           str(cesq["rxlev"]) if "rxlev" in cesq else "-")
-        self._set_subtitle(self._signal_rows["RSCP (dBm)"], fmt_dbm(cesq.get("rscp_dbm")))
-        self._set_subtitle(self._signal_rows["ECNO (dB)"],
-                           f"{cesq['ecno']/2 - 24.5:.1f}" if "ecno" in cesq and cesq["ecno"] != 255 else "-")
+        rat_num = cereg.get("act")
+        rat = ACCESS_TECH.get(rat_num, str(rat_num)) if rat_num is not None else None
+        if rat:
+            self._sig_labels["RAT"].set_text(rat)
+        tac = self._fmt(cereg.get("tac"))
+        if tac:
+            self._sig_labels["TAC"].set_text(tac)
+        cid = self._fmt(cereg.get("cell_id"))
+        if cid:
+            self._sig_labels["Cell ID"].set_text(cid)
+        reg_status = cereg.get("status")
+        if reg_status is not None:
+            reg_text = CEREG_STATUS.get(reg_status, str(reg_status))
+            self._sig_labels["Registration"].set_text(reg_text)
+
+        sl = self._sig_labels
+        sl["RSRP (dBm)"].set_text(fmt_dbm(cesq.get("rsrp_dbm")))
+        sl["RSRQ (dB)"].set_text(fmt_db(cesq.get("rsrq_db")))
+        sl["RSSI (dBm)"].set_text(fmt_dbm(cesq.get("rssi_dbm")))
+        sl["SINR (dB)"].set_text(fmt_db(cesq.get("sinr_db")))
+        sl["RXLEV"].set_text(str(cesq["rxlev"]) if "rxlev" in cesq else "-")
+        sl["RSCP (dBm)"].set_text(fmt_dbm(cesq.get("rscp_dbm")))
+        ecno = cesq.get("ecno")
+        sl["ECNO (dB)"].set_text(f"{ecno/2 - 24.5:.1f}" if ecno is not None and ecno != 255 else "-")
 
     def _make_preset_handler(self, cmd: str):
         def handler(_btn):
@@ -494,7 +568,7 @@ class MainWindow(Adw.ApplicationWindow):
         try:
             self.modem.command("AT+ECELLMEAS=1", timeout=10)
             self._cell_meas_status = True
-            self._set_subtitle(self._cell_rows["Status"], "measuring")
+            self._cell_labels["Status"].set_text("measuring")
             self._log("[AT] ECELLMEAS started", "ok")
         except Exception as e:
             self._log(f"[AT] ECELLMEAS=1 failed: {e}", "err")
@@ -506,7 +580,7 @@ class MainWindow(Adw.ApplicationWindow):
         try:
             self.modem.command("AT+ECELLMEAS=0", timeout=10)
             self._cell_meas_status = False
-            self._set_subtitle(self._cell_rows["Status"], "stopped")
+            self._cell_labels["Status"].set_text("stopped")
             self._log("[AT] ECELLMEAS stopped", "ok")
         except Exception as e:
             self._log(f"[AT] ECELLMEAS=0 failed: {e}", "err")
@@ -527,19 +601,47 @@ class MainWindow(Adw.ApplicationWindow):
         c = cells[0]
         rat_map = {7: "LTE", 11: "NR", 13: "LTE (ENDC)", 256: "C2K"}
         rat = c.get("act")
-        self._set_subtitle(self._cell_rows["Status"], "ok")
-        self._set_subtitle(self._cell_rows["RAT"], rat_map.get(rat, str(rat)) if rat is not None else "-")
-        self._set_subtitle(self._cell_rows["ARFCN"], str(c.get("psc_or_pci", "-")))
-        self._set_subtitle(self._cell_rows["PCI"], "-")
-        self._set_subtitle(self._cell_rows["RSRP (dBm)"],
-                           str(c.get("sig1_in_dbm", "-")) if c.get("sig1_in_dbm") is not None else "-")
-        self._set_subtitle(self._cell_rows["RSRQ (dB)"],
-                           str(c.get("sig2_in_dbm", "-")) if c.get("sig2_in_dbm") is not None else "-")
-        self._set_subtitle(self._cell_rows["SNR (dB)"], "-")
-        self._set_subtitle(self._cell_rows["Cell ID"], str(c.get("cid", "-")))
-        self._set_subtitle(self._cell_rows["PLMNs"],
-                           f"{c.get('mcc', '?')}/{c.get('mnc', '?')}")
-        self._set_subtitle(self._cell_rows["Band"], "-")
+        cl = self._cell_labels
+        cl["Status"].set_text("ok")
+        cl["RAT"].set_text(rat_map.get(rat, str(rat)) if rat is not None else "-")
+        cl["ARFCN"].set_text(str(c.get("psc_or_pci", "-")))
+        cl["PCI"].set_text("-")
+        cl["RSRP (dBm)"].set_text(
+            str(c.get("sig1_in_dbm", "-")) if c.get("sig1_in_dbm") is not None else "-")
+        cl["RSRQ (dB)"].set_text(
+            str(c.get("sig2_in_dbm", "-")) if c.get("sig2_in_dbm") is not None else "-")
+        cl["SNR (dB)"].set_text("-")
+        cl["Cell ID"].set_text(str(c.get("cid", "-")))
+        cl["PLMNs"].set_text(f"{c.get('mcc', '?')}/{c.get('mnc', '?')}")
+        cl["Band"].set_text("-")
+
+    def _on_get_geolocation(self, _btn=None) -> None:
+        if not self.modem:
+            self._log("[!] No modem selected", "err")
+            return
+        try:
+            raw = self.modem.command("AT+EIMSGEO?", timeout=15)
+        except Exception as e:
+            self._log(f"[AT] EIMSGEO? failed: {e}", "err")
+            return
+        geo = parse_eimsgeo(raw)
+        pl = self._pos_labels
+        if not geo:
+            self._log("[AT] EIMSGEO?: no data in response", "info")
+            pl["Status"].set_text("no data")
+            return
+        pl["Status"].set_text("ok" if geo.get("latitude") else "waiting")
+        pl["Latitude"].set_text(geo.get("latitude", "-"))
+        pl["Longitude"].set_text(geo.get("longitude", "-"))
+        pl["Altitude (m)"].set_text(geo.get("altitude", "-"))
+        acc = geo.get("accuracy_semiMajorAxis", "-")
+        pl["Accuracy (m)"].set_text(str(acc))
+        pl["Confidence"].set_text(geo.get("confidence", "-"))
+        pl["Method"].set_text(geo.get("method", "-"))
+        pl["City"].set_text(geo.get("city", "-"))
+        pl["State"].set_text(geo.get("state", "-"))
+        pl["ZIP"].set_text(geo.get("zip", "-"))
+        pl["Country"].set_text(geo.get("country", "-"))
 
     def _on_send(self, _widget=None) -> None:
         cmd = self._entry_row.get_text().strip()
