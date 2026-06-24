@@ -388,48 +388,30 @@ class MainWindow(Adw.ApplicationWindow):
         page = Adw.PreferencesPage()
         page.set_title("Positioning")
 
-        gnss_group = Adw.PreferencesGroup()
-        gnss_group.set_title("GNSS Status")
-        gnss_group.set_description("GPS/GLONASS/Galileo/BeiDou receiver status")
-        gnss_grid, self._gnss_labels = self._make_prop_grid(
-            ("Source", "Fix status", "Latitude", "Longitude",
-             "Altitude (m)", "Accuracy (m)", "Sats used", "Sats tracked"),
+        info_group = Adw.PreferencesGroup()
+        info_group.set_title("Location Services")
+        info_group.set_description(
+            "This modem has no GNSS receiver AT interface.\n"
+            "Location data is computed by the Android/Linux framework\n"
+            "and fed to the modem for IMS emergency calls."
         )
-        gnss_group.add(gnss_grid)
-        gnss_btns = (
-            ("Start GNSS", self._make_preset_handler("AT+QGPS=1")),
-            ("Stop GNSS", self._make_preset_handler("AT+QGPS=0")),
-            ("GNSS status", self._make_preset_handler("AT+QGPS?")),
-            ("Get position", self._make_preset_handler("AT+QGPSLOC?")),
-            ("Sats in view", self._make_preset_handler("AT+QGPSGNMEA=\"GSV\"")),
+        info_grid, self._info_generic_labels = self._make_prop_grid(
+            ("GNSS receiver", "Location source"),
         )
-        flow = Gtk.FlowBox()
-        flow.set_max_children_per_line(4)
-        flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_column_spacing(6)
-        flow.set_row_spacing(6)
-        flow.set_homogeneous(True)
-        for label, handler in gnss_btns:
-            btn = Gtk.Button(label=label)
-            btn.add_css_class("flat")
-            btn.connect("clicked", handler)
-            flow.append(btn)
-        gnss_group.add(flow)
-        page.add(gnss_group)
+        self._info_generic_labels["GNSS receiver"].set_text("Not available via AT")
+        self._info_generic_labels["Location source"].set_text("Android framework (GPS/WiFi/cell)")
+        row = Adw.ActionRow()
+        row.set_activatable_widget(info_grid)
+        row.add_suffix(info_grid)
+        info_group.add(row)
+        page.add(info_group)
 
-        pos_group = Adw.PreferencesGroup()
-        pos_group.set_title("Geolocation (AT+EIMSGEO)")
-        pos_group.set_description("Modem-based geolocation via WiFi/cell DB")
-        pos_grid, self._pos_labels = self._make_prop_grid(
-            ("Status", "Method", "Latitude", "Longitude", "Altitude (m)",
-             "Accuracy (m)", "Confidence", "City", "State", "ZIP", "Country"),
-        )
-        pos_group.add(pos_grid)
-        pos_btns = (
-            ("Loc UI on", self._make_preset_handler("AT+ELOCAEN=1")),
-            ("Loc UI off", self._make_preset_handler("AT+ELOCAEN=0")),
-            ("Loc UI ?", self._make_preset_handler("AT+ELOCAEN?")),
-            ("Geo info", self._on_get_geolocation),
+        loc_group = Adw.PreferencesGroup()
+        loc_group.set_title("Location UI (AT+ELOCAEN)")
+        loc_group.set_description("Enable/disable modem location UI")
+        loc_btns = (
+            ("Enable", self._make_preset_handler("AT+ELOCAEN=1")),
+            ("Disable", self._make_preset_handler("AT+ELOCAEN=0")),
         )
         flow = Gtk.FlowBox()
         flow.set_max_children_per_line(4)
@@ -437,13 +419,58 @@ class MainWindow(Adw.ApplicationWindow):
         flow.set_column_spacing(6)
         flow.set_row_spacing(6)
         flow.set_homogeneous(True)
-        for label, handler in pos_btns:
+        for label, handler in loc_btns:
             btn = Gtk.Button(label=label)
             btn.add_css_class("flat")
             btn.connect("clicked", handler)
             flow.append(btn)
-        pos_group.add(flow)
-        page.add(pos_group)
+        loc_group.add(flow)
+        page.add(loc_group)
+
+        ims_group = Adw.PreferencesGroup()
+        ims_group.set_title("IMS Geolocation (AT+EIMSGEO)")
+        ims_group.set_description(
+            "AP provides location to modem for emergency calls.\n"
+            "Modem sends +EIMSGEO URC, AP responds with AT+EIMSGEO=..."
+        )
+        ims_grid, self._pos_labels = self._make_prop_grid(
+            ("Status", "Method", "Latitude", "Longitude", "Altitude (m)",
+             "Accuracy (m)", "Confidence"),
+        )
+        row = Adw.ActionRow()
+        row.set_activatable_widget(ims_grid)
+        row.add_suffix(ims_grid)
+        ims_group.add(row)
+        ims_btn = Gtk.Button(label="Query IMS geo status")
+        ims_btn.set_halign(Gtk.Align.START)
+        ims_btn.connect("clicked", self._on_get_geolocation)
+        ims_group.add(ims_btn)
+        page.add(ims_group)
+
+        net_group = Adw.PreferencesGroup()
+        net_group.set_title("Network-based Positioning")
+        net_group.set_description("Cell info commands for location context")
+        net_btns = (
+            ("CREG?", self._make_preset_handler("AT+CREG?")),
+            ("CEREG?", self._make_preset_handler("AT+CEREG?")),
+            ("C5GREG?", self._make_preset_handler("AT+C5GREG?")),
+            ("COPS?", self._make_preset_handler("AT+COPS?")),
+            ("ECELL", self._make_preset_handler("AT+ECELL")),
+            ("ECELLID?", self._make_preset_handler("AT+ECELLID?")),
+        )
+        flow = Gtk.FlowBox()
+        flow.set_max_children_per_line(4)
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_column_spacing(6)
+        flow.set_row_spacing(6)
+        flow.set_homogeneous(True)
+        for label, handler in net_btns:
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            btn.connect("clicked", handler)
+            flow.append(btn)
+        net_group.add(flow)
+        page.add(net_group)
 
         return page
 
@@ -457,8 +484,8 @@ class MainWindow(Adw.ApplicationWindow):
         act = c.get("act")
         sig1 = c.get("sig1")
         sig1_dbm = c.get("sig1_in_dbm")
-        if sig1 is None:
-            return "-"
+        if sig1 is None or not isinstance(sig1, int):
+            return str(sig1_dbm) if isinstance(sig1_dbm, int) else "-"
         if act in (7,):  # LTE: 3GPP index 0-97
             if 0 <= sig1 <= 97:
                 return f"{sig1 - 141:.0f}"
@@ -469,22 +496,22 @@ class MainWindow(Adw.ApplicationWindow):
             if 0 <= sig1 <= 96:
                 return f"{sig1 - 121:.0f}"
             return str(sig1)
-        return str(sig1_dbm) if sig1_dbm is not None else str(sig1)
+        return str(sig1_dbm) if isinstance(sig1_dbm, int) else str(sig1)
 
     @staticmethod
     def _ecell_rsrq_str(c: dict) -> str:
         act = c.get("act")
         sig2 = c.get("sig2")
         sig2_dbm = c.get("sig2_in_dbm")
-        if sig2 is None:
-            return "-"
+        if sig2 is None or not isinstance(sig2, int):
+            return str(sig2_dbm) if isinstance(sig2_dbm, int) else "-"
         if act in (7,):  # LTE: RSRQ 0-34 -> -19.5 to -3 dB
             if 0 <= sig2 <= 34:
                 return f"{sig2 / 2.0 - 19.5:.1f}"
             return str(sig2)
         if act in (11, 13):  # NR: SS-RSRQ quarter-dBm
             return f"{sig2 / 4:.1f}"
-        return str(sig2_dbm) if sig2_dbm is not None else str(sig2)
+        return str(sig2_dbm) if isinstance(sig2_dbm, int) else str(sig2)
 
     def _log(self, text: str, tag: str | None = None) -> None:
         end = self.log_buffer.get_end_iter()
@@ -690,8 +717,8 @@ class MainWindow(Adw.ApplicationWindow):
         cl["PCI"].set_text(str(c.get("psc_or_pci", "-")))
         cl["RSRP (dBm)"].set_text(self._ecell_rsrp_str(c))
         cl["RSRQ (dB)"].set_text(self._ecell_rsrq_str(c))
-        snr = c.get("sig2_in_dbm")
-        cl["SNR (dB)"].set_text(str(snr) if snr is not None else "-")
+        ext1 = c.get("ext1")
+        cl["SNR (dB)"].set_text(str(ext1) if isinstance(ext1, int) else "-")
         cl["Cell ID"].set_text(str(c.get("cid", "-")))
         cl["PLMNs"].set_text(f"{c.get('mcc', '?')}/{c.get('mnc', '?')}")
         cl["Band"].set_text(str(c.get("ext3", "-")))
@@ -747,10 +774,20 @@ class MainWindow(Adw.ApplicationWindow):
         except Exception as e:
             self._log(f"[AT] EIMSGEO? failed: {e}", "err")
             return
-        geo = parse_eimsgeo(raw)
         pl = self._pos_labels
+        if "CME ERROR" in raw:
+            self._log("[AT] EIMSGEO query not supported by this modem (write-only)", "info")
+            pl["Status"].set_text("query not supported")
+            pl["Method"].set_text("-")
+            pl["Latitude"].set_text("-")
+            pl["Longitude"].set_text("-")
+            pl["Altitude (m)"].set_text("-")
+            pl["Accuracy (m)"].set_text("-")
+            pl["Confidence"].set_text("-")
+            return
+        geo = parse_eimsgeo(raw)
         if not geo:
-            self._log("[AT] EIMSGEO?: no data in response", "info")
+            self._log("[AT] EIMSGEO: no data in response", "info")
             pl["Status"].set_text("no data")
             return
         pl["Status"].set_text("ok" if geo.get("latitude") else "waiting")
@@ -761,10 +798,6 @@ class MainWindow(Adw.ApplicationWindow):
         pl["Accuracy (m)"].set_text(str(acc))
         pl["Confidence"].set_text(geo.get("confidence", "-"))
         pl["Method"].set_text(geo.get("method", "-"))
-        pl["City"].set_text(geo.get("city", "-"))
-        pl["State"].set_text(geo.get("state", "-"))
-        pl["ZIP"].set_text(geo.get("zip", "-"))
-        pl["Country"].set_text(geo.get("country", "-"))
 
     def _on_send(self, _widget=None) -> None:
         cmd = self._entry_row.get_text().strip()
