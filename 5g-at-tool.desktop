@@ -2,7 +2,7 @@
 Type=Application
 Name=5G AT Tool
 GenericName=Modem AT Command Tool
-Comment=Send AT commands to a 5G modem through oFono (FuriLabs AT)
+Comment=Send AT commands to a 5G modem through oFono (FuriLabs AT) — Adw/GTK4 build
 Exec=python3 /home/furios/5g-at-tool.py
 Icon=5g-at-tool
 Terminal=false

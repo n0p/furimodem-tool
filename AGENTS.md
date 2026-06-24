@@ -4,7 +4,7 @@ Project context for AI agents (or the user) to pick up work later.
 
 ## What this is
 
-Single-file PyGTK (PyGObject/GTK3) app that talks to a 5G modem through
+Multi-module Adw/GTK4 app that talks to a 5G modem through
 oFono's FuriLabs AT passthrough plugin:
 
     busctl call org.ofono /ril_0 org.ofono.FuriLabs.AT SendCommand s "AT+ECSQ"
@@ -16,7 +16,10 @@ deploys by `scp`-ing the files to `furios@<phone>`.
 
 ```
 5g-at-tool/
-├── 5g-at-tool.py          # the whole app, ~1046 lines
+├── 5g-at-tool.py          # entry point (Adw.Application)
+├── ui.py                  # MainWindow + App + all UI (~684 lines)
+├── ofono.py               # OfonoModem, OfonoMonitor, DBus setup
+├── parsers.py             # AT response parsers (parse_cesq, parse_cereg, etc.)
 ├── 5g-at-tool.desktop     # phosh launcher entry
 ├── icons/5g-at-tool.svg   # app icon
 ├── README.md              # user-facing docs
@@ -29,7 +32,14 @@ PDF — kept locally for reference, gitignored.
 
 ## Phone deployment
 
-- Host: `furios@10.205.52.43` (ssh, ed25519)
+Two known networks. Pick whichever is reachable; both deploy to the same
+path on the phone.
+
+| Nickname | Host                | Notes                                |
+|----------|---------------------|--------------------------------------|
+| `casa`   | `furios@10.1.2.151` | Home Wi-Fi                           |
+| `t3`     | `furios@10.205.52.43` | T3 mobile hotspot (current)         |
+
 - User home: `/home/furios/`
 - Python: `/usr/bin/python3` (3.13)
 - Display: phosh on Wayland (`WAYLAND_DISPLAY=wayland-0`)
@@ -38,32 +48,30 @@ Files deployed on the phone:
 
 | Local                                   | Phone                                                                |
 |-----------------------------------------|----------------------------------------------------------------------|
-| `5g-at-tool.py`                         | `/home/furios/5g-at-tool.py`                                         |
+| `5g-at-tool.py`                         | `/home/furios/5g-at-tool/5g-at-tool.py`                              |
+| `ui.py`                                 | `/home/furios/5g-at-tool/ui.py`                                      |
+| `ofono.py`                              | `/home/furios/5g-at-tool/ofono.py`                                   |
+| `parsers.py`                            | `/home/furios/5g-at-tool/parsers.py`                                 |
 | `5g-at-tool.desktop`                    | `/home/furios/.local/share/applications/5g-at-tool.desktop`          |
 | `icons/5g-at-tool.svg`                  | `/home/furios/.local/share/icons/hicolor/scalable/apps/5g-at-tool.svg` |
 
 After deploying the icon or desktop file, refresh the caches on the phone:
 
 ```sh
-ssh furios@10.205.52.43 'gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor/ && update-desktop-database ~/.local/share/applications/'
+ssh furios@<host> 'gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor/ && update-desktop-database ~/.local/share/applications/'
 ```
 
 The `.desktop` uses `Icon=5g-at-tool` (name, not path) so the hicolor theme
 resolves it. `StartupWMClass=es.n0p.fiveg_at_tool` matches the GTK
 `application_id` so the window is grouped correctly.
 
-## Desktop file conventions used
+## UI Layout (Adw.OverlaySplitView)
 
-```ini
-Exec=python3 /home/furios/5g-at-tool.py
-Icon=5g-at-tool
-Categories=Network;TelephonyTools;Utility;
-StartupNotify=true
-StartupWMClass=es.n0p.fiveg_at_tool
-```
-
-`TelephonyTools` (not `Telephony`) is the freedesktop category used by
-`modem-manager-gui.desktop` on the phone.
+- **Sidebar**: modem selector, log, history (AT command history rows).
+- **Tab 1 — Status**: modem info (Manufacturer, Model, Revision, IMEI, IMSI, Online, Powered, Type, Operator, Registration, Tech, Strength) + 5G signal rows (RAT, MCC/MNC, TAC, Cell ID, RSRP, RSRQ, RSSI, SINR, RXLEV, RSCP, ECNO). Also shows refresh button and Operator/Registration from the sidebar.
+- **Tab 2 — Positioning**: cell measurement (AT+ECELLMEAS, AT+ECELL) + geolocation (AT+ELOCAEN, AT+EIMSGEO) sections.
+- **Tab 3 — Terminal**: AT command input (EntryRow + timeout SpinRow + Send button + Clear log button) + AT preset buttons + log TextView + history rows.
+- **HeaderBar**: title, refresh modem button, sidebar toggle.
 
 ## oFono interfaces used
 
@@ -83,11 +91,12 @@ Verify with:
 busctl introspect org.ofono /ril_0 org.ofono.FuriLabs.AT
 ```
 
-## AT command presets (in `_build_ui`)
+## AT command presets (in `_build_terminal_page`)
 
-`ATI`, `AT+COPS?`, `AT+ECSQ`, `AT+CESQ`, `AT+QENG="servingcell"`,
-`AT+QCAINFO`, `AT+QCFG="nr5g"?`, `AT+QCFG="band"?`, `AT+CGSN`, `AT+CIMI`,
-`AT+CGREG?`.
+`ATI`, `AT+CGMI`, `AT+CGMM`, `AT+CGMR`, `AT+CGSN`, `AT+CIMI`,
+`AT+COPS?`, `AT+CESQ`, `AT+ECSQ`, `AT+CREG?`, `AT+CEREG?`,
+`AT+C5GREG?`, `AT+GCAP`, `AT+QENG="servingcell"`, `AT+QCAINFO`,
+`AT+ECID`, `AT+CGATT?`, `AT+CPIN?`.
 
 `AT+QENG="servingcell"` is parsed by `parse_qeng_servingcell()` for
 RSRP/RSRQ/SINR/band/ARFCN/PCI/MCC/MNC/cell ID. `AT+ECSQ` is parsed by
@@ -95,12 +104,6 @@ RSRP/RSRQ/SINR/band/ARFCN/PCI/MCC/MNC/cell ID. `AT+ECSQ` is parsed by
 
 ## Known issues / non-fatal warnings
 
-- `Gtk-CRITICAL gtk_box_pack: assertion '_gtk_widget_get_parent (child) ==
-  NULL' failed` at startup — three widgets are packed into multiple
-  parents (likely the preset buttons being reused in the toolbar and
-  history pane). Non-fatal; window still renders. Worth fixing by
-  detaching the widget from its old parent with `Gtk.container.remove`
-  before re-packing, or by giving each section its own button instance.
 - `desktop-file-validate` warns about `Categories=Network;TelephonyTools;Utility;`
   having more than one main category. `modem-manager-gui.desktop` ships
   the same way; leaving as-is.
@@ -110,15 +113,49 @@ RSRP/RSRQ/SINR/band/ARFCN/PCI/MCC/MNC/cell ID. `AT+ECSQ` is parsed by
 ## Smoke tests on the phone
 
 ```sh
-ssh furios@10.205.52.43 'python3 -c "import py_compile; py_compile.compile(\"/home/furios/5g-at-tool.py\", doraise=True)"'
-ssh furios@10.205.52.43 'WAYLAND_DISPLAY=wayland-0 timeout 3 python3 /home/furios/5g-at-tool.py 2>&1 | head'
+ssh furios@<host> 'python3 -c "import py_compile; py_compile.compile(\"/home/furios/5g-at-tool/ui.py\", doraise=True)"'
+ssh furios@<host> 'WAYLAND_DISPLAY=wayland-0 timeout 3 python3 /home/furios/5g-at-tool/5g-at-tool.py 2>&1 | head'
 ```
 
 Icon resolution check:
 
 ```sh
-ssh furios@10.205.52.43 'python3 -c "import gi; gi.require_version(\"Gtk\",\"3.0\"); from gi.repository import Gtk; t=Gtk.IconTheme.get_default(); print(t.lookup_icon(\"5g-at-tool\", 128, 0).get_filename())"'
+ssh furios@<host> 'python3 -c "import gi; gi.require_version(\"Gtk\",\"3.0\"); from gi.repository import Gtk; t=Gtk.IconTheme.get_default(); print(t.lookup_icon(\"5g-at-tool\", 128, 0).get_filename())"'
 ```
+
+Run app and take screenshot:
+
+```sh
+ssh furios@10.205.52.43 'setsid WAYLAND_DISPLAY=wayland-0 python3 /home/furios/5g-at-tool/5g-at-tool.py &' && sleep 3 && ssh furios@10.205.52.43 'shotman -c output' && scp furios@10.205.52.43:~/Pictures/*.png . && ssh furios@10.205.52.43 'pkill -9 python3; rm ~/Pictures/*.png'
+```
+
+## Bugs fixed
+
+### Round 1 (initial migration from single-file)
+1. Removed unused `import GObject` (ui.py L16).
+2. Removed dead `tag.set_foreground(... if False else None)` (ui.py L60).
+3. Connected `key-pressed` to inner Gtk.Entry via `get_entry()` (ui.py L229).
+4. Moved log from PreferencesGroup to Gtk.Frame inside page (ui.py L255-263).
+5. Removed walrus `cmd:="..."` in tuple (ui.py L291).
+6. `get_selected()` now checks `Gtk.INVALID_LIST_POSITION` (ui.py L448).
+7. `from parsers import parse_ecell` moved to top (ui.py L26-30).
+8. Replaced non-existent `get_rows()` with `observe_children()` (ui.py L627-631).
+9. `self.log_view` assigned (ui.py L253).
+10. `_on_props_changed` connected to bus via `add_signal_receiver` (ui.py L68-75).
+11. `_poll_signal` now calls `_refresh_signal_info` (ui.py L671-675).
+12. Removed invalid `member_signature=None` from `add_signal_receiver` (ui.py L74).
+13. Replaced `set_placeholder_text` with `set_tooltip_text` + `connect("apply")` — EntryRow lacks placeholder method (ui.py L227-229).
+14. `Gtk.WrapMode.WRAP_CHAR` → `WORD_CHAR` (ui.py L251).
+15. `page.add(log_frame)` → use `Adw.PreferencesGroup(log_group).add(scrolled)` (ui.py L263-265).
+16. `Gio.BindingFlags` → `GObject.BindingFlags` (ui.py L128).
+17. Escaped `&` in titles (`"Power & sleep"` → `"Power &amp; sleep"`, `"CSG & operator"` → `"CSG &amp; operator"`) (ui.py L372, L386).
+18. `insert_with_tags_by_name(end, text, -1, tag)` → `insert_with_tags_by_name(end, msg, tag)` — GTK4 doesn't accept length 3rd arg as int instead of tag name (ui.py L404-408).
+
+### Round 2 (tab restructure)
+- Replaced 3rd "Network" tab with "Terminal" tab reusing signal/presets from sidebar.
+- Moved modem info + signal rows from sidebar to Tab 1 (Status).
+- Moved AT preset buttons from sidebar to Tab 3 (Terminal).
+- Sidebar now only has: modem selector combo + log + history.
 
 ## TODO / next steps
 
@@ -134,6 +171,6 @@ ssh furios@10.205.52.43 'python3 -c "import gi; gi.require_version(\"Gtk\",\"3.0
       first one oFono returns).
 - [ ] Save AT command history to `~/.local/share/5g-at-tool/history`.
 - [ ] Consider packaging as a flatpak or a `.deb` once stable.
-- [ ] The `Exec=python3 /home/furios/5g-at-tool.py` path is hardcoded;
+- [ ] The `Exec=python3 /home/furios/5g-at-tool/5g-at-tool.py` path is hardcoded;
       consider `Exec=python3 %U 5g-at-tool.py` with `Path=` or a wrapper
       script in `~/.local/bin/` so the install path isn't pinned.
