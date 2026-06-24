@@ -29,7 +29,6 @@ from parsers import (
     parse_cereg,
     parse_cesq,
     parse_ecell,
-    parse_eimsgeo,
 )
 
 
@@ -388,27 +387,9 @@ class MainWindow(Adw.ApplicationWindow):
         page = Adw.PreferencesPage()
         page.set_title("Positioning")
 
-        info_group = Adw.PreferencesGroup()
-        info_group.set_title("Location Services")
-        info_group.set_description(
-            "This modem has no GNSS receiver AT interface.\n"
-            "Location data is computed by the Android/Linux framework\n"
-            "and fed to the modem for IMS emergency calls."
-        )
-        info_grid, self._info_generic_labels = self._make_prop_grid(
-            ("GNSS receiver", "Location source"),
-        )
-        self._info_generic_labels["GNSS receiver"].set_text("Not available via AT")
-        self._info_generic_labels["Location source"].set_text("Android framework (GPS/WiFi/cell)")
-        row = Adw.ActionRow()
-        row.set_activatable_widget(info_grid)
-        row.add_suffix(info_grid)
-        info_group.add(row)
-        page.add(info_group)
-
         loc_group = Adw.PreferencesGroup()
         loc_group.set_title("Location UI (AT+ELOCAEN)")
-        loc_group.set_description("Enable/disable modem location UI")
+        loc_group.set_description("Enable/disable modem location display")
         loc_btns = (
             ("Enable", self._make_preset_handler("AT+ELOCAEN=1")),
             ("Disable", self._make_preset_handler("AT+ELOCAEN=0")),
@@ -427,30 +408,10 @@ class MainWindow(Adw.ApplicationWindow):
         loc_group.add(flow)
         page.add(loc_group)
 
-        ims_group = Adw.PreferencesGroup()
-        ims_group.set_title("IMS Geolocation (AT+EIMSGEO)")
-        ims_group.set_description(
-            "AP provides location to modem for emergency calls.\n"
-            "Modem sends +EIMSGEO URC, AP responds with AT+EIMSGEO=..."
-        )
-        ims_grid, self._pos_labels = self._make_prop_grid(
-            ("Status", "Method", "Latitude", "Longitude", "Altitude (m)",
-             "Accuracy (m)", "Confidence"),
-        )
-        row = Adw.ActionRow()
-        row.set_activatable_widget(ims_grid)
-        row.add_suffix(ims_grid)
-        ims_group.add(row)
-        ims_btn = Gtk.Button(label="Query IMS geo status")
-        ims_btn.set_halign(Gtk.Align.START)
-        ims_btn.connect("clicked", self._on_get_geolocation)
-        ims_group.add(ims_btn)
-        page.add(ims_group)
-
-        net_group = Adw.PreferencesGroup()
-        net_group.set_title("Network-based Positioning")
-        net_group.set_description("Cell info commands for location context")
-        net_btns = (
+        cell_group = Adw.PreferencesGroup()
+        cell_group.set_title("Cell-based Location")
+        cell_group.set_description("Cell ID, TAC, and registration for coarse positioning")
+        cell_btns = (
             ("CREG?", self._make_preset_handler("AT+CREG?")),
             ("CEREG?", self._make_preset_handler("AT+CEREG?")),
             ("C5GREG?", self._make_preset_handler("AT+C5GREG?")),
@@ -464,13 +425,13 @@ class MainWindow(Adw.ApplicationWindow):
         flow.set_column_spacing(6)
         flow.set_row_spacing(6)
         flow.set_homogeneous(True)
-        for label, handler in net_btns:
+        for label, handler in cell_btns:
             btn = Gtk.Button(label=label)
             btn.add_css_class("flat")
             btn.connect("clicked", handler)
             flow.append(btn)
-        net_group.add(flow)
-        page.add(net_group)
+        cell_group.add(flow)
+        page.add(cell_group)
 
         return page
 
@@ -765,39 +726,9 @@ class MainWindow(Adw.ApplicationWindow):
             page = self._build_neighbor_page(i, cell)
             self._neighbor_stack.add_titled(page, f"neighbor_{i}", f"#{i + 1}")
 
-    def _on_get_geolocation(self, _btn=None) -> None:
-        if not self.modem:
-            self._log("[!] No modem selected", "err")
-            return
-        try:
-            raw = self.modem.command("AT+EIMSGEO?", timeout=15)
-        except Exception as e:
-            self._log(f"[AT] EIMSGEO? failed: {e}", "err")
-            return
-        pl = self._pos_labels
-        if "CME ERROR" in raw:
-            self._log("[AT] EIMSGEO query not supported by this modem (write-only)", "info")
-            pl["Status"].set_text("query not supported")
-            pl["Method"].set_text("-")
-            pl["Latitude"].set_text("-")
-            pl["Longitude"].set_text("-")
-            pl["Altitude (m)"].set_text("-")
-            pl["Accuracy (m)"].set_text("-")
-            pl["Confidence"].set_text("-")
-            return
-        geo = parse_eimsgeo(raw)
-        if not geo:
-            self._log("[AT] EIMSGEO: no data in response", "info")
-            pl["Status"].set_text("no data")
-            return
-        pl["Status"].set_text("ok" if geo.get("latitude") else "waiting")
-        pl["Latitude"].set_text(geo.get("latitude", "-"))
-        pl["Longitude"].set_text(geo.get("longitude", "-"))
-        pl["Altitude (m)"].set_text(geo.get("altitude", "-"))
-        acc = geo.get("accuracy_semiMajorAxis", "-")
-        pl["Accuracy (m)"].set_text(str(acc))
-        pl["Confidence"].set_text(geo.get("confidence", "-"))
-        pl["Method"].set_text(geo.get("method", "-"))
+    # No GNSS AT commands available on this modem.
+    # Location is provided by the phone framework (oFono/phosh).
+    # See AT+ELOCAEN (location UI) in the Terminal tab presets.
 
     def _on_send(self, _widget=None) -> None:
         cmd = self._entry_row.get_text().strip()
