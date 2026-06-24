@@ -614,7 +614,7 @@ class MainWindow(Adw.ApplicationWindow):
 
 class App(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="es.n0p.fiveg_at_tool")
+        super().__init__(application_id="es.n0p.furimodem_tool")
 
     def do_activate(self):
         win = MainWindow(self)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""5G Modem AT Tool (oFono backend, Adw/GTK4).
+"""FuriModem Tool (oFono backend, Adw/GTK4).
 
 Entry point. UI is in ui.py, DBus in ofono.py, parsers in parsers.py.
 
@@ -20,7 +20,7 @@ from ui import MainWindow
 
 class App(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="es.n0p.fiveg_at_tool")
+        super().__init__(application_id="es.n0p.furimodem_tool")
 
     def do_activate(self):
         win = MainWindow(self)

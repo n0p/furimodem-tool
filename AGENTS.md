@@ -1,4 +1,4 @@
-# AGENTS.md — 5G AT Tool context
+# AGENTS.md — FuriModem Tool context
 
 Project context for AI agents (or the user) to pick up work later.
 
@@ -15,15 +15,15 @@ deploys by `scp`-ing the files to `furios@<phone>`.
 ## File layout
 
 ```
-5g-at-tool/
-├── 5g-at-tool.py          # entry point (Adw.Application)
-├── ui.py                  # MainWindow + App + all UI (~684 lines)
-├── ofono.py               # OfonoModem, OfonoMonitor, DBus setup
-├── parsers.py             # AT response parsers (parse_cesq, parse_cereg, etc.)
-├── 5g-at-tool.desktop     # phosh launcher entry
-├── icons/5g-at-tool.svg   # app icon
-├── README.md              # user-facing docs
-├── AGENTS.md              # this file (agent/handoff context)
+furimodem-tool/
+├── furimodem-tool.py       # entry point (Adw.Application)
+├── ui.py                   # MainWindow + App + all UI (~632 lines)
+├── ofono.py                # OfonoModem, OfonoMonitor, DBus setup
+├── parsers.py              # AT response parsers (parse_cesq, parse_cereg, etc.)
+├── furimodem-tool.desktop  # phosh launcher entry
+├── icons/furimodem-tool.svg # app icon
+├── README.md               # user-facing docs
+├── AGENTS.md               # this file (agent/handoff context)
 └── .gitignore
 ```
 
@@ -48,12 +48,12 @@ Files deployed on the phone:
 
 | Local                                   | Phone                                                                |
 |-----------------------------------------|----------------------------------------------------------------------|
-| `5g-at-tool.py`                         | `/home/furios/5g-at-tool/5g-at-tool.py`                              |
+| `furimodem-tool.py`                     | `/home/furios/5g-at-tool/furimodem-tool.py`                          |
 | `ui.py`                                 | `/home/furios/5g-at-tool/ui.py`                                      |
 | `ofono.py`                              | `/home/furios/5g-at-tool/ofono.py`                                   |
 | `parsers.py`                            | `/home/furios/5g-at-tool/parsers.py`                                 |
-| `5g-at-tool.desktop`                    | `/home/furios/.local/share/applications/5g-at-tool.desktop`          |
-| `icons/5g-at-tool.svg`                  | `/home/furios/.local/share/icons/hicolor/scalable/apps/5g-at-tool.svg` |
+| `furimodem-tool.desktop`                | `/home/furios/.local/share/applications/furimodem-tool.desktop`      |
+| `icons/furimodem-tool.svg`              | `/home/furios/.local/share/icons/hicolor/scalable/apps/furimodem-tool.svg` |
 
 After deploying the icon or desktop file, refresh the caches on the phone:
 
@@ -61,8 +61,8 @@ After deploying the icon or desktop file, refresh the caches on the phone:
 ssh furios@<host> 'gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor/ && update-desktop-database ~/.local/share/applications/'
 ```
 
-The `.desktop` uses `Icon=5g-at-tool` (name, not path) so the hicolor theme
-resolves it. `StartupWMClass=es.n0p.fiveg_at_tool` matches the GTK
+The `.desktop` uses `Icon=furimodem-tool` (name, not path) so the hicolor theme
+resolves it. `StartupWMClass=es.n0p.furimodem_tool` matches the GTK
 `application_id` so the window is grouped correctly.
 
 ## UI Layout (Adw.OverlaySplitView)
@@ -114,19 +114,19 @@ RSRP/RSRQ/SINR/band/ARFCN/PCI/MCC/MNC/cell ID. `AT+ECSQ` is parsed by
 
 ```sh
 ssh furios@<host> 'python3 -c "import py_compile; py_compile.compile(\"/home/furios/5g-at-tool/ui.py\", doraise=True)"'
-ssh furios@<host> 'WAYLAND_DISPLAY=wayland-0 timeout 3 python3 /home/furios/5g-at-tool/5g-at-tool.py 2>&1 | head'
+ssh furios@<host> 'WAYLAND_DISPLAY=wayland-0 timeout 3 python3 /home/furios/5g-at-tool/furimodem-tool.py 2>&1 | head'
 ```
 
 Icon resolution check:
 
 ```sh
-ssh furios@<host> 'python3 -c "import gi; gi.require_version(\"Gtk\",\"3.0\"); from gi.repository import Gtk; t=Gtk.IconTheme.get_default(); print(t.lookup_icon(\"5g-at-tool\", 128, 0).get_filename())"'
+ssh furios@<host> 'python3 -c "import gi; gi.require_version(\"Gtk\",\"3.0\"); from gi.repository import Gtk; t=Gtk.IconTheme.get_default(); print(t.lookup_icon(\"furimodem-tool\", 128, 0).get_filename())"'
 ```
 
 Run app and take screenshot:
 
 ```sh
-ssh furios@10.205.52.43 'setsid WAYLAND_DISPLAY=wayland-0 python3 /home/furios/5g-at-tool/5g-at-tool.py &' && sleep 3 && ssh furios@10.205.52.43 'shotman -c output' && scp furios@10.205.52.43:~/Pictures/*.png . && ssh furios@10.205.52.43 'pkill -9 python3; rm ~/Pictures/*.png'
+ssh furios@10.205.52.43 'setsid WAYLAND_DISPLAY=wayland-0 python3 /home/furios/5g-at-tool/furimodem-tool.py &' && sleep 3 && ssh furios@10.205.52.43 'shotman -c output' && scp furios@10.205.52.43:~/Pictures/*.png . && ssh furios@10.205.52.43 'pkill -9 python3; rm ~/Pictures/*.png'
 ```
 
 ## Bugs fixed
@@ -157,20 +157,19 @@ ssh furios@10.205.52.43 'setsid WAYLAND_DISPLAY=wayland-0 python3 /home/furios/5
 - Moved AT preset buttons from sidebar to Tab 3 (Terminal).
 - Sidebar now only has: modem selector combo + log + history.
 
+### Round 3 (rename to FuriModem Tool)
+- Renamed project from `5g-at-tool` to `furimodem-tool`.
+- Updated `application_id` from `es.n0p.fiveg_at_tool` to `es.n0p.furimodem_tool`.
+- Updated all file names, desktop entry, icon, README, AGENTS.md.
+
 ## TODO / next steps
 
 - [ ] Fix the `gtk_box_pack` warnings (detach buttons before re-pack).
 - [ ] Add a "favorites" or pinned entry in phosh so the icon appears in
-      the quick-launch strip (not just the app drawer). phosh reads
-      `~/.local/share/applications/` for `.desktop` files and the pinned
-      list lives in `org.gnome.desktop.app-folders` gschema — needs
-      `gsettings` write.
+      the quick-launch strip (not just the app drawer).
 - [ ] Add a status bar / tray indicator showing modem online state without
       opening the full window.
-- [ ] Persist the last-used modem path across runs (currently picks the
-      first one oFono returns).
-- [ ] Save AT command history to `~/.local/share/5g-at-tool/history`.
+- [ ] Persist the last-used modem path across runs.
+- [ ] Save AT command history to `~/.local/share/furimodem-tool/history`.
 - [ ] Consider packaging as a flatpak or a `.deb` once stable.
-- [ ] The `Exec=python3 /home/furios/5g-at-tool/5g-at-tool.py` path is hardcoded;
-      consider `Exec=python3 %U 5g-at-tool.py` with `Path=` or a wrapper
-      script in `~/.local/bin/` so the install path isn't pinned.
+- [ ] Consider a wrapper script in `~/.local/bin/` so the install path isn't pinned.
