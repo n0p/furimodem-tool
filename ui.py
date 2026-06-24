@@ -102,13 +102,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._view_stack.set_hexpand(True)
 
         status_page = self._build_status_page()
-        positioning_page = self._build_positioning_page()
         terminal_page = self._build_terminal_page()
         self._view_stack.add_titled(status_page, "status", "Status")
-        self._view_stack.add_titled(positioning_page, "positioning", "Positioning")
         self._view_stack.add_titled(terminal_page, "terminal", "Terminal")
         status_page.set_icon_name("network-cellular-signal-good-symbolic")
-        positioning_page.set_icon_name("location-symbolic")
         terminal_page.set_icon_name("utilities-terminal-symbolic")
 
         switcher_bar = Adw.ViewSwitcherBar()
@@ -250,13 +247,6 @@ class MainWindow(Adw.ApplicationWindow):
         ns_sw_row.set_activatable_widget(neighbor_switcher)
         ns_sw_row.add_suffix(neighbor_switcher)
         neighbor_group.add(ns_sw_row)
-        refresh_neighbor_btn = Gtk.Button(label="Refresh neighbours")
-        refresh_neighbor_btn.set_halign(Gtk.Align.START)
-        refresh_neighbor_btn.connect("clicked", self._refresh_neighbor_cells)
-        rn_row = Adw.ActionRow()
-        rn_row.set_activatable_widget(refresh_neighbor_btn)
-        rn_row.add_suffix(refresh_neighbor_btn)
-        neighbor_group.add(rn_row)
         page.add(neighbor_group)
 
         modem_group = Adw.PreferencesGroup()
@@ -383,58 +373,6 @@ class MainWindow(Adw.ApplicationWindow):
 
         return page
 
-    def _build_positioning_page(self) -> Adw.PreferencesPage:
-        page = Adw.PreferencesPage()
-        page.set_title("Positioning")
-
-        loc_group = Adw.PreferencesGroup()
-        loc_group.set_title("Location UI (AT+ELOCAEN)")
-        loc_group.set_description("Enable/disable modem location display")
-        loc_btns = (
-            ("Enable", self._make_preset_handler("AT+ELOCAEN=1")),
-            ("Disable", self._make_preset_handler("AT+ELOCAEN=0")),
-        )
-        flow = Gtk.FlowBox()
-        flow.set_max_children_per_line(4)
-        flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_column_spacing(6)
-        flow.set_row_spacing(6)
-        flow.set_homogeneous(True)
-        for label, handler in loc_btns:
-            btn = Gtk.Button(label=label)
-            btn.add_css_class("flat")
-            btn.connect("clicked", handler)
-            flow.append(btn)
-        loc_group.add(flow)
-        page.add(loc_group)
-
-        cell_group = Adw.PreferencesGroup()
-        cell_group.set_title("Cell-based Location")
-        cell_group.set_description("Cell ID, TAC, and registration for coarse positioning")
-        cell_btns = (
-            ("CREG?", self._make_preset_handler("AT+CREG?")),
-            ("CEREG?", self._make_preset_handler("AT+CEREG?")),
-            ("C5GREG?", self._make_preset_handler("AT+C5GREG?")),
-            ("COPS?", self._make_preset_handler("AT+COPS?")),
-            ("ECELL", self._make_preset_handler("AT+ECELL")),
-            ("ECELLID?", self._make_preset_handler("AT+ECELLID?")),
-        )
-        flow = Gtk.FlowBox()
-        flow.set_max_children_per_line(4)
-        flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_column_spacing(6)
-        flow.set_row_spacing(6)
-        flow.set_homogeneous(True)
-        for label, handler in cell_btns:
-            btn = Gtk.Button(label=label)
-            btn.add_css_class("flat")
-            btn.connect("clicked", handler)
-            flow.append(btn)
-        cell_group.add(flow)
-        page.add(cell_group)
-
-        return page
-
     @staticmethod
     def _ecell_rat_str(act: int | None) -> str:
         m = {7: "LTE", 11: "NR", 13: "LTE (ENDC)", 256: "C2K"}
@@ -476,7 +414,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _log(self, text: str, tag: str | None = None) -> None:
         end = self.log_buffer.get_end_iter()
-        msg = text + "\n"
+        msg = text.replace("\r", "") + "\n"
         if tag:
             self.log_buffer.insert_with_tags_by_name(end, msg, tag)
         else:
