@@ -686,27 +686,30 @@ class MainWindow(Adw.ApplicationWindow):
         cl = self._cell_labels
         cl["Status"].set_text("ok")
         cl["RAT"].set_text(self._ecell_rat_str(c.get("act")))
-        cl["ARFCN"].set_text(str(c.get("psc_or_pci", "-")))
-        cl["PCI"].set_text("-")
+        cl["ARFCN"].set_text(str(c.get("ext4", "-")))
+        cl["PCI"].set_text(str(c.get("psc_or_pci", "-")))
         cl["RSRP (dBm)"].set_text(self._ecell_rsrp_str(c))
         cl["RSRQ (dB)"].set_text(self._ecell_rsrq_str(c))
-        cl["SNR (dB)"].set_text("-")
+        snr = c.get("sig2_in_dbm")
+        cl["SNR (dB)"].set_text(str(snr) if snr is not None else "-")
         cl["Cell ID"].set_text(str(c.get("cid", "-")))
         cl["PLMNs"].set_text(f"{c.get('mcc', '?')}/{c.get('mnc', '?')}")
-        cl["Band"].set_text("-")
+        cl["Band"].set_text(str(c.get("ext3", "-")))
 
     def _build_neighbor_page(self, idx: int, cell: dict) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         group = Adw.PreferencesGroup()
         group.set_title(f"Neighbour #{idx + 1}")
         grid, labels = self._make_prop_grid(
-            ("RAT", "ARFCN/PCI", "Cell ID", "MCC/MNC",
+            ("RAT", "PCI", "Cell ID", "MCC/MNC",
              "RSRP (dBm)", "RSRQ (dB)"),
         )
         labels["RAT"].set_text(self._ecell_rat_str(cell.get("act")))
-        labels["ARFCN/PCI"].set_text(str(cell.get("psc_or_pci", "-")))
+        labels["PCI"].set_text(str(cell.get("psc_or_pci", "-")))
         labels["Cell ID"].set_text(str(cell.get("cid", "-")))
-        labels["MCC/MNC"].set_text(f"{cell.get('mcc', '?')}/{cell.get('mnc', '?')}")
+        mcc = cell.get("mcc")
+        mnc = cell.get("mnc")
+        labels["MCC/MNC"].set_text(f"{mcc}/{mnc}" if mcc is not None and mnc is not None else "-")
         labels["RSRP (dBm)"].set_text(self._ecell_rsrp_str(cell))
         labels["RSRQ (dB)"].set_text(self._ecell_rsrq_str(cell))
         gr = Adw.ActionRow()

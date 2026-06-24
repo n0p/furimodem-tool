@@ -134,7 +134,9 @@ def parse_ecellmeas(text: str) -> dict:
 
 def parse_ecell(text: str) -> list[dict]:
     """Parse +ECELL: <num_of_cell>,<Act>,<cell1>,<cell2>,...
-    where each cell has 16 fields: <cid>,<lac_or_tac>,<mcc>,<mnc>,<psc_or_pci>,<sig1>,<sig2>,<sig1_in_dbm>,<sig2_in_dbm>,<ta>,<ext1>,<ext2>,<ext3>,<ext4>,<ext5>,<ext6>."""
+    Each cell has up to 14 fields (ext5/ext6 often omitted):
+    <cid>,<lac_or_tac>,<mcc>,<mnc>,<psc_or_pci>,<sig1>,<sig2>,
+    <sig1_in_dbm>,<sig2_in_dbm>,<ta>,<ext1>,<ext2>,<ext3>,<ext4>"""
     cells = []
     m = re.search(r"\+ECELL:\s*([^\n\r]+)", text or "")
     if not m:
@@ -170,7 +172,8 @@ def parse_ecell(text: str) -> list[dict]:
             act = parts[1]
     keys = ("cid", "lac_or_tac", "mcc", "mnc", "psc_or_pci",
             "sig1", "sig2", "sig1_in_dbm", "sig2_in_dbm",
-            "ta", "ext1", "ext2", "ext3", "ext4", "ext5", "ext6")
+            "ta", "ext1", "ext2", "ext3", "ext4")
+    CELL_FIELDS = len(keys)
     idx = 2
     for _ in range(num):
         cell = {"act": act}
@@ -187,6 +190,8 @@ def parse_ecell(text: str) -> list[dict]:
                 else:
                     cell[key] = val
                 idx += 1
+            else:
+                cell[key] = None
         cells.append(cell)
     return cells
 
