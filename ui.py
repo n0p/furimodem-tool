@@ -304,48 +304,64 @@ class MainWindow(Adw.ApplicationWindow):
 
         presets_group = Adw.PreferencesGroup()
         presets_group.set_title("AT Presets")
+        DISRUPTIVE = ("AT+EPOF", "AT+EPON", "AT+ESLP=1")
         presets = (
-            ("ATI", self._make_preset_handler("ATI")),
-            ("CGMI", self._make_preset_handler("AT+CGMI")),
-            ("CGMM", self._make_preset_handler("AT+CGMM")),
-            ("CGMR", self._make_preset_handler("AT+CGMR")),
-            ("CGSN", self._make_preset_handler("AT+CGSN")),
-            ("CIMI", self._make_preset_handler("AT+CIMI")),
-            ("COPS?", self._make_preset_handler("AT+COPS?")),
-            ("CESQ", self._make_preset_handler("AT+CESQ")),
-            ("ECSQ", self._make_preset_handler("AT+ECSQ")),
-            ("CREG?", self._make_preset_handler("AT+CREG?")),
-            ("CEREG?", self._make_preset_handler("AT+CEREG?")),
-            ("C5GREG?", self._make_preset_handler("AT+C5GREG?")),
-            ("GCAP", self._make_preset_handler("AT+GCAP")),
-            ("ECID", self._make_preset_handler("AT+ECID")),
-            ("CGATT?", self._make_preset_handler("AT+CGATT?")),
-            ("CPIN?", self._make_preset_handler("AT+CPIN?")),
-            ("EXOPL", self._make_preset_handler("AT+EXOPL")),
-            ("EPRATL", self._make_preset_handler("AT+EPRATL?")),
-            ("E5GOPT?", self._make_preset_handler("AT+E5GOPT?")),
-            ("ERAT?", self._make_preset_handler("AT+ERAT?")),
-            ("ECAINFO", self._make_preset_handler("AT+ECAINFO?")),
-            ("ENRCABAND", self._make_preset_handler("AT+ENRCABAND?")),
-            ("ECCAUSE", self._make_preset_handler("AT+ECCAUSE?")),
-            ("EONS?", self._make_preset_handler("AT+EONS?")),
-            ("ELCE?", self._make_preset_handler("AT+ELCE?")),
-            ("ECELCK?", self._make_preset_handler("AT+ECELCK?")),
-            ("EPOF", self._make_preset_handler("AT+EPOF")),
-            ("ESLP?", self._make_preset_handler("AT+ESLP?")),
+            ("ATI", "Terminal info", "ATI"),
+            ("CGMI", "Manufacturer", "AT+CGMI"),
+            ("CGMM", "Model", "AT+CGMM"),
+            ("CGMR", "Firmware rev", "AT+CGMR"),
+            ("CGSN", "IMEI", "AT+CGSN"),
+            ("CIMI", "IMSI", "AT+CIMI"),
+            ("COPS?", "Operator", "AT+COPS?"),
+            ("CESQ", "3GPP signal", "AT+CESQ"),
+            ("ECSQ", "Ericsson sig", "AT+ECSQ"),
+            ("CREG?", "2G/3G reg", "AT+CREG?"),
+            ("CEREG?", "4G reg", "AT+CEREG?"),
+            ("C5GREG?", "5G reg", "AT+C5GREG?"),
+            ("GCAP", "Capabilities", "AT+GCAP"),
+            ("ECID", "Cell ID", "AT+ECID"),
+            ("CGATT?", "Packet attach", "AT+CGATT?"),
+            ("CPIN?", "SIM status", "AT+CPIN?"),
+            ("EXOPL", "Full op scan", "AT+EXOPL"),
+            ("EPRATL", "RAT list pref", "AT+EPRATL?"),
+            ("E5GOPT?", "5G mode cfg", "AT+E5GOPT?"),
+            ("ERAT?", "Query RAT", "AT+ERAT?"),
+            ("ECAINFO", "Carrier agg", "AT+ECAINFO?"),
+            ("ENRCABAND", "NR band info", "AT+ENRCABAND?"),
+            ("ECCAUSE", "Reject cause", "AT+ECCAUSE?"),
+            ("EONS?", "Op name disp", "AT+EONS?"),
+            ("ELCE?", "Link capacity", "AT+ELCE?"),
+            ("ECELCK?", "Cell lock qry", "AT+ECELCK?"),
+            ("EPOF", "Power off !", "AT+EPOF"),
+            ("ESLP?", "Sleep query", "AT+ESLP?"),
         )
-        flow = Gtk.FlowBox()
-        flow.set_max_children_per_line(4)
-        flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_column_spacing(6)
-        flow.set_row_spacing(6)
-        flow.set_homogeneous(True)
-        for label, handler in presets:
-            btn = Gtk.Button(label=label)
+        preset_flow = Gtk.FlowBox()
+        preset_flow.set_max_children_per_line(6)
+        preset_flow.set_min_children_per_line(3)
+        preset_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        preset_flow.set_column_spacing(2)
+        preset_flow.set_row_spacing(2)
+        preset_flow.set_homogeneous(True)
+        for label, desc, cmd in presets:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            lbl = Gtk.Label(label=label)
+            lbl.set_xalign(0.5)
+            lbl.add_css_class("heading")
+            sub = Gtk.Label(label=desc)
+            sub.set_xalign(0.5)
+            sub.add_css_class("caption")
+            sub.set_opacity(0.6)
+            box.append(lbl)
+            box.append(sub)
+            btn = Gtk.Button(child=box)
             btn.add_css_class("flat")
-            btn.connect("clicked", handler)
-            flow.append(btn)
-        presets_group.add(flow)
+            btn.set_size_request(-1, 36)
+            if cmd in DISRUPTIVE:
+                btn.connect("clicked", lambda *_, c=cmd: self._confirm_and_send(c))
+            else:
+                btn.connect("clicked", self._make_preset_handler(cmd))
+            preset_flow.append(btn)
+        presets_group.add(preset_flow)
         page.add(presets_group)
 
         log_view = Gtk.TextView(buffer=self.log_buffer, editable=False, monospace=True,
@@ -356,7 +372,7 @@ class MainWindow(Adw.ApplicationWindow):
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_child(log_view)
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.ALWAYS)
-        scrolled.set_size_request(-1, 240)
+        scrolled.set_size_request(-1, 180)
         scrolled.set_margin_start(8)
         scrolled.set_margin_end(8)
         scrolled.set_margin_top(4)
@@ -668,6 +684,18 @@ class MainWindow(Adw.ApplicationWindow):
     # Location is provided by the phone framework (oFono/phosh).
     # See AT+ELOCAEN (location UI) in the Terminal tab presets.
 
+    def _confirm_and_send(self, cmd: str) -> None:
+        dialog = Adw.AlertDialog(
+            heading="Confirm destructive command",
+            body=f"Are you sure?\n'{cmd}' may disrupt the modem.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("send", "Send")
+        dialog.set_response_appearance("send", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.choose(self, None, lambda _dlg, result: self._do_send(cmd) if _dlg.choose_finish(result) == "send" else None)
+
     def _on_send(self, _widget=None) -> None:
         cmd = self._entry_row.get_text().strip()
         if not cmd:
@@ -692,7 +720,8 @@ class MainWindow(Adw.ApplicationWindow):
                 return
             GLib.idle_add(self._log, f"<-- {resp}", "rx")
 
-        threading.Thread(target=worker, daemon=True).start()
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
 
     def _add_history_row(self, cmd: str) -> None:
         time_str = GLib.DateTime.new_now_local().format("%H:%M:%S")
@@ -701,11 +730,7 @@ class MainWindow(Adw.ApplicationWindow):
         row.set_subtitle(cmd)
         row.set_activatable(True)
         row.connect("activated", self._make_preset_handler(cmd))
-        self._history_group.prepend(row)
-        children = self._history_group.observe_children()
-        while children.get_n_items() > HISTORY_MAX:
-            last = children.get_item(children.get_n_items() - 1)
-            self._history_group.remove(last)
+        self._history_group.add(row)
 
     def _on_entry_key(self, _widget, event) -> bool:
         if not self._command_history:
