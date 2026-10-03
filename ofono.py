@@ -22,6 +22,8 @@ OFONO_NETWORK_REG_IFACE = "org.ofono.NetworkRegistration"
 OFONO_SIM_IFACE = "org.ofono.SimManager"
 OFONO_AT_IFACE = "org.ofono.FuriLabs.AT"
 OFONO_PROP_IFACE = "org.freedesktop.DBus.Properties"
+OFONO_CONN_CTX_IFACE = "org.ofono.ConnectionContext"
+OFONO_CONN_MGR_IFACE = "org.ofono.ConnectionManager"
 
 
 class OfonoModem:
@@ -58,6 +60,38 @@ class OfonoModem:
 
     def has_interface(self, iface: str) -> bool:
         return iface in self.interfaces()
+
+    # --- PDP contexts / APN -------------------------------------------------
+
+    def list_contexts(self) -> list[dict]:
+        """Return the modem's GPRS contexts: [{'path','name','type','apn'}]."""
+        try:
+            mgr = dbus.Interface(
+                self._proxy, OFONO_CONN_MGR_IFACE).GetContexts()
+        except dbus.DBusException:
+            return []
+        contexts = []
+        for path, props in mgr:
+            contexts.append({
+                "path": str(path),
+                "name": str(props.get("Name", "") or ""),
+                "type": str(props.get("Type", "") or ""),
+                "apn": str(props.get("AccessPointName", "") or ""),
+            })
+        contexts.sort(key=lambda c: c["path"])
+        return contexts
+
+    def set_context_apn(self, ctx_path: str, apn: str) -> None:
+        """Set AccessPointName on a context via its own SetProperty(sv)."""
+        obj = self.bus.get_object(OFONO_BUS, ctx_path)
+        ctx = dbus.Interface(obj, OFONO_CONN_CTX_IFACE)
+        ctx.SetProperty("AccessPointName", dbus.String(apn))
+
+    def provision_context(self, ctx_path: str) -> None:
+        """Ask ofono to (re)apply serviceproviders.xml provisioning."""
+        obj = self.bus.get_object(OFONO_BUS, ctx_path)
+        ctx = dbus.Interface(obj, OFONO_CONN_CTX_IFACE)
+        ctx.ProvisionContext()
 
     def command(self, cmd: str, timeout: int = 10) -> str:
         """Send raw AT command via org.ofono.FuriLabs.AT.SendCommand(s) -> s."""

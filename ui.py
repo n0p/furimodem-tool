@@ -4,6 +4,7 @@ Layout: Adw.OverlaySplitView with a sidebar (modem selector, log, history)
 and a content area with an Adw.ViewStack (Status, Positioning, Terminal).
 """
 
+import subprocess
 import sys
 import threading
 from collections import deque
@@ -102,10 +103,13 @@ class MainWindow(Adw.ApplicationWindow):
         self._view_stack.set_hexpand(True)
 
         status_page = self._build_status_page()
+        apn_page = self._build_apn_page()
         terminal_page = self._build_terminal_page()
         self._view_stack.add_titled(status_page, "status", "Status")
+        self._view_stack.add_titled(apn_page, "apn", "APN")
         self._view_stack.add_titled(terminal_page, "terminal", "Terminal")
         status_page.set_icon_name("network-cellular-signal-good-symbolic")
+        apn_page.set_icon_name("network-workgroup-symbolic")
         terminal_page.set_icon_name("utilities-terminal-symbolic")
 
         switcher_bar = Adw.ViewSwitcherBar()
@@ -265,6 +269,240 @@ class MainWindow(Adw.ApplicationWindow):
         page.add(modem_group)
 
         return page
+
+    def _build_apn_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        page.set_title("APN")
+
+        sim_group = Adw.PreferencesGroup()
+        sim_group.set_title("Current SIM")
+        self._apn_sim_rows: dict[str, Adw.ActionRow] = {}
+        for key in ("Operator", "MCC/MNC", "IMSI", "ICCID"):
+            row = Adw.ActionRow()
+            row.set_title(key)
+            row.set_subtitle("-")
+            self._apn_sim_rows[key] = row
+            sim_group.add(row)
+        page.add(sim_group)
+
+        ctx_group = Adw.PreferencesGroup()
+        ctx_group.set_title("PDP contexts")
+        ctx_group.set_description(
+            "Edit the Access Point Name of the selected context. "
+            "Provisioning re-applies the entry matching this SIM's "
+            "MCC/MNC from /usr/share/mobile-broadband-provider-info/"
+            "serviceproviders.xml")
+        self._ctx_list = Gtk.StringList()
+        self._ctx_combo = Adw.ComboRow()
+        self._ctx_combo.set_title("Context")
+        self._ctx_combo.set_model(self._ctx_list)
+        self._ctx_combo.connect("notify::selected", self._on_context_changed)
+        ctx_group.add(self._ctx_combo)
+
+        self._apn_row = Adw.EntryRow()
+        self._apn_row.set_title("APN")
+        self._apn_row.set_show_apply_button(True)
+        self._apn_row.connect("apply", self._on_apply_apn)
+        ctx_group.add(self._apn_row)
+
+        ctx_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ctx_btns.set_margin_top(8)
+        ctx_btns.set_margin_bottom(8)
+        refresh_ctx_btn = Gtk.Button(label="Refresh")
+        refresh_ctx_btn.set_tooltip_text("Reload contexts from oFono")
+        refresh_ctx_btn.connect("clicked", lambda *_: self._refresh_apn_tab())
+        ctx_btns.append(refresh_ctx_btn)
+        apply_btn = Gtk.Button(label="Apply")
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.set_tooltip_text("Write the APN above to the selected context")
+        apply_btn.connect("clicked", self._on_apply_apn)
+        ctx_btns.append(apply_btn)
+        prov_btn = Gtk.Button(label="from XML")
+        prov_btn.set_tooltip_text(
+            "org.ofono.ConnectionContext.ProvisionContext — matches MCC/MNC "
+            "against serviceproviders.xml and overwrites the context APN")
+        prov_btn.connect("clicked", self._on_provision_context)
+        ctx_btns.append(prov_btn)
+        btn_row = Adw.ActionRow()
+        btn_row.set_activatable_widget(ctx_btns)
+        btn_row.add_suffix(ctx_btns)
+        ctx_group.add(btn_row)
+        page.add(ctx_group)
+
+        svc_group = Adw.PreferencesGroup()
+        svc_group.set_title("Services")
+        svc_group.set_description(
+            "Restart the modem stack. Active data calls drop while the "
+            "services restart.")
+        self._apn_status_row = Adw.ActionRow()
+        self._apn_status_row.set_title("Status")
+        self._apn_status_row.set_subtitle("idle")
+        svc_group.add(self._apn_status_row)
+
+        svc_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        svc_btns.set_margin_top(8)
+        svc_btns.set_margin_bottom(8)
+        restart_ofono_btn = Gtk.Button(label="Restart oFono")
+        restart_ofono_btn.add_css_class("destructive-action")
+        restart_ofono_btn.set_tooltip_text("setprop vendor.ril.mtk.restart 1")
+        restart_ofono_btn.connect("clicked", lambda *_: self._confirm_run(
+            "Restart oFono?",
+            "setprop vendor.ril.mtk.restart 1\nThe RIL daemon and oFono "
+            "will restart; data drops briefly.",
+            "setprop vendor.ril.mtk.restart 1"))
+        svc_btns.append(restart_ofono_btn)
+        restart_mm_btn = Gtk.Button(label="Restart ModemManager")
+        restart_mm_btn.add_css_class("destructive-action")
+        restart_mm_btn.set_tooltip_text(
+            "systemctl restart ModemManager.service (sudo)")
+        restart_mm_btn.connect("clicked", lambda *_: self._confirm_run(
+            "Restart ModemManager?",
+            "sudo systemctl restart ModemManager.service\n(ofono2mm bridge)",
+            "sudo -n systemctl restart ModemManager.service"))
+        svc_btns.append(restart_mm_btn)
+        svc_row = Adw.ActionRow()
+        svc_row.set_activatable_widget(svc_btns)
+        svc_row.add_suffix(svc_btns)
+        svc_group.add(svc_row)
+        page.add(svc_group)
+
+        self._apn_contexts: list[dict] = []
+        return page
+
+    # --- APN tab handlers ----------------------------------------------------
+
+    def _set_apn_status(self, text: str) -> None:
+        GLib.idle_add(self._apn_status_row.set_subtitle, text)
+
+    def _refresh_apn_tab(self) -> None:
+        if not self.modem:
+            return
+        info = self.modem.get_modem_info()
+        rows = self._apn_sim_rows
+        op = self._fmt(info.get("operator_name")) or "-"
+        mcc_mnc = (self._fmt(info.get("mcc")) or "?") + "/" + \
+                  (self._fmt(info.get("mnc")) or "?")
+        rows["Operator"].set_subtitle(op)
+        rows["MCC/MNC"].set_subtitle(mcc_mnc)
+        rows["IMSI"].set_subtitle(self._fmt(info.get("imsi")) or "-")
+        rows["ICCID"].set_subtitle(self._fmt(info.get("iccid")) or "-")
+
+        try:
+            contexts = self.modem.list_contexts()
+        except dbus.DBusException as e:
+            self._log(f"[APN] context enumeration failed: {e}", "err")
+            return
+        self._apn_contexts = contexts
+        prev_path = None
+        idx = self._ctx_combo.get_selected()
+        if 0 <= idx < len(self._apn_contexts):
+            prev_path = self._apn_contexts[idx]["path"]
+        n = self._ctx_list.get_n_items()
+        self._ctx_list.splice(0, n, [])
+        for c in contexts:
+            self._ctx_list.append(
+                f"{c['path']}  [{c['type']}]  {c['apn'] or '(no APN)'}")
+        select = 0
+        if prev_path:
+            for i, c in enumerate(contexts):
+                if c["path"] == prev_path:
+                    select = i
+                    break
+        if contexts:
+            self._ctx_combo.set_selected(select)
+            self._apn_row.set_text(contexts[select]["apn"])
+        else:
+            self._apn_row.set_text("")
+            self._log("[APN] no contexts found", "info")
+
+    def _on_context_changed(self, *_args) -> None:
+        idx = self._ctx_combo.get_selected()
+        if idx < 0 or idx >= len(self._apn_contexts) \
+                or idx == Gtk.INVALID_LIST_POSITION:
+            return
+        self._apn_row.set_text(self._apn_contexts[idx]["apn"])
+
+    def _selected_context(self) -> dict | None:
+        idx = self._ctx_combo.get_selected()
+        if idx < 0 or idx >= len(self._apn_contexts) \
+                or idx == Gtk.INVALID_LIST_POSITION:
+            return None
+        return self._apn_contexts[idx]
+
+    def _on_apply_apn(self, *_args) -> None:
+        if not self.modem:
+            self._log("[!] No modem selected", "err")
+            return
+        ctx = self._selected_context()
+        if not ctx:
+            self._log("[APN] no context selected", "err")
+            return
+        apn = self._apn_row.get_text().strip()
+        if not apn:
+            self._log("[APN] empty APN — refusing", "err")
+            return
+        try:
+            self.modem.set_context_apn(ctx["path"], apn)
+        except dbus.DBusException as e:
+            self._log(f"[APN] SetProperty failed on {ctx['path']}: {e}", "err")
+            return
+        ctx["apn"] = apn
+        self._log(f"[APN] {ctx['path']} AccessPointName := '{apn}'", "ok")
+        self._refresh_apn_tab()
+
+    def _on_provision_context(self, *_args) -> None:
+        if not self.modem:
+            self._log("[!] No modem selected", "err")
+            return
+        ctx = self._selected_context()
+        if not ctx:
+            self._log("[APN] no context selected", "err")
+            return
+        try:
+            self.modem.provision_context(ctx["path"])
+        except dbus.DBusException as e:
+            self._log(f"[APN] ProvisionContext failed: {e}", "err")
+            return
+        self._log(f"[APN] ProvisionContext on {ctx['path']} done — "
+                  "check MCC/MNC match in serviceproviders.xml", "ok")
+        self._refresh_apn_tab()
+
+    def _confirm_run(self, heading: str, body: str, cmd: str) -> None:
+        dialog = Adw.AlertDialog(heading=heading, body=body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("run", "Run")
+        dialog.set_response_appearance("run", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.choose(
+            self, None,
+            lambda dlg, result: self._run_shell(cmd)
+            if dlg.choose_finish(result) == "run" else None)
+
+    def _run_shell(self, cmd: str) -> None:
+        self._set_apn_status(f"running: {cmd}")
+        self._log(f"[sh] $ {cmd}", "tx")
+
+        def worker():
+            try:
+                proc = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=60)
+                out = (proc.stdout + proc.stderr).strip()
+                rc = proc.returncode
+            except Exception as e:  # noqa: BLE001
+                GLib.idle_add(self._log, f"[sh] error: {e}", "err")
+                GLib.idle_add(self._apn_status_row.set_subtitle, f"error: {e}")
+                return
+            if out:
+                for line in out.splitlines():
+                    GLib.idle_add(self._log, f"[sh] {line}",
+                                  "ok" if rc == 0 else "err")
+            GLib.idle_add(self._log, f"[sh] exit {rc}",
+                          "ok" if rc == 0 else "err")
+            GLib.idle_add(self._apn_status_row.set_subtitle,
+                          f"last: {cmd} -> exit {rc}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_terminal_page(self) -> Adw.PreferencesPage:
         page = Adw.PreferencesPage()
@@ -483,6 +721,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._log(f"[oFono] Selected {path}", "ok")
             self._refresh_info()
             self._refresh_signal_info()
+            self._refresh_apn_tab()
         except dbus.DBusException as e:
             self.modem = None
             self._log(f"[oFono] cannot open modem: {e}", "err")

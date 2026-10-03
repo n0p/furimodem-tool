@@ -69,7 +69,8 @@ resolves it. `StartupWMClass=es.n0p.furimodem_tool` matches the GTK
 
 - **Sidebar**: modem selector, log, history (AT command history rows).
 - **Tab 1 — Status**: modem info (Manufacturer, Model, Revision, IMEI, IMSI, Online, Powered, Type, Operator, Registration, Tech, Strength) + 5G signal rows (RAT, MCC/MNC, TAC, Cell ID, RSRP, RSRQ, RSSI, SINR, RXLEV, RSCP, ECNO). Also shows refresh button and Operator/Registration from the sidebar.
-- **Tab 2 — Positioning**: cell measurement (AT+ECELLMEAS, AT+ECELL) + geolocation (AT+ELOCAEN, AT+EIMSGEO) sections.
+- **Tab 2 — APN**: current SIM block (Operator, MCC/MNC, IMSI, ICCID of the inserted card), PDP context selector + editable APN EntryRow with Refresh / Apply / from XML buttons (Apply → `ConnectionContext.SetProperty("AccessPointName")`; from XML → `ConnectionContext.ProvisionContext` which re-applies the serviceproviders.xml entry matching the SIM MCC/MNC), and a Services block with confirm-guarded "Restart oFono" (`setprop vendor.ril.mtk.restart 1`, no root needed) and "Restart ModemManager" (`sudo -n systemctl restart ModemManager.service`). Keep context-button labels short — long labels overflow the phone screen.
+- **Tab 2 — Positioning**: removed (see commit "Drop positioning tab").
 - **Tab 3 — Terminal**: AT command input (EntryRow + timeout SpinRow + Send button + Clear log button) + AT preset buttons + log TextView + history rows.
 - **HeaderBar**: title, refresh modem button, sidebar toggle.
 
@@ -130,6 +131,27 @@ ssh furios@10.205.52.43 'setsid WAYLAND_DISPLAY=wayland-0 python3 /home/furios/5
 ```
 
 ## Bugs fixed
+
+### Round 4 (APN tab)
+- FuriLabs ofono does NOT expose `Manager.GetObjectsAndInterfaces` (returns
+  UnknownMethod) — enumerate contexts via
+  `org.ofono.ConnectionManager.GetContexts() -> a{oa{sv}}` on the modem path.
+- Contexts do NOT accept `org.freedesktop.DBus.Properties.Set` (UnknownMethod)
+  — use the context's own `org.ofono.ConnectionContext.SetProperty(sv)`.
+- Context APN changes are runtime-only: a RIL restart (`setprop
+  vendor.ril.mtk.restart 1`) resets un-persisted APNs back to the built-in
+  defaults when no `/var/lib/ofono/<IMSI>/settings` exists — re-Apply or
+  Provision after restarting oFono.
+- Long button labels overflow the phone-width window; use short labels
+  (Refresh / Apply / from XML) + tooltips.
+- Screenshot testing on the phone: shotman panics ("requested global not
+  found"); use instead:
+  `gdbus call --session --dest org.gnome.Shell.Screenshot --object-path
+  /org/gnome/Shell/Screenshot --method org.gnome.Shell.Screenshot.Screenshot
+  true false /tmp/x.png` with
+  `XDG_RUNTIME_DIR=/run/user/32011 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/32011/bus`
+  (furios' real uid runtime dir is 32011, NOT 1000 — GUI apps fail with
+  "Gtk couldn't be initialized" or dconf permission errors without it).
 
 ### Round 1 (initial migration from single-file)
 1. Removed unused `import GObject` (ui.py L16).
