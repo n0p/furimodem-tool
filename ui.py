@@ -4,9 +4,12 @@ Layout: Adw.OverlaySplitView with a sidebar (modem selector, log, history)
 and a content area with an Adw.ViewStack (Status, Positioning, Terminal).
 """
 
+import os
+import shlex
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 
 import dbus
@@ -36,6 +39,17 @@ from parsers import (
 LOG_MAX = 5000
 HISTORY_MAX = 200
 POLL_INTERVAL_S = 2
+
+# mmcli presets ('-m any' crashes libmm-glib with the ofono2mm backend —
+# the modem is always /Modem/0, so pin it)
+MMCLI_PRESETS = (
+    ("3GPP scan", "-m 0 --3gpp-scan"),
+    ("Status", "-m 0 --status"),
+    ("Modem list", "-L"),
+    ("Signal quality", "-m 0 --signal-quality"),
+    ("Simple status", "-m 0 --simple-status"),
+    ("Location", "-m 0 --location-get"),
+)
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -104,12 +118,18 @@ class MainWindow(Adw.ApplicationWindow):
 
         status_page = self._build_status_page()
         apn_page = self._build_apn_page()
+        net_page = self._build_networks_page()
+        mmcli_page = self._build_mmcli_page()
         terminal_page = self._build_terminal_page()
         self._view_stack.add_titled(status_page, "status", "Status")
         self._view_stack.add_titled(apn_page, "apn", "APN")
+        self._view_stack.add_titled(net_page, "networks", "Networks")
+        self._view_stack.add_titled(mmcli_page, "mmcli", "mmcli")
         self._view_stack.add_titled(terminal_page, "terminal", "Terminal")
         status_page.set_icon_name("network-cellular-signal-good-symbolic")
         apn_page.set_icon_name("network-workgroup-symbolic")
+        net_page.set_icon_name("network-cellular-connected-symbolic")
+        mmcli_page.set_icon_name("system-search-symbolic")
         terminal_page.set_icon_name("utilities-terminal-symbolic")
 
         switcher_bar = Adw.ViewSwitcherBar()
@@ -186,7 +206,7 @@ class MainWindow(Adw.ApplicationWindow):
         page.set_title("Status")
 
         signal_group = Adw.PreferencesGroup()
-        signal_group.set_title("Network & Signal")
+        signal_group.set_title("Network &amp; Signal")
         signal_group.set_description("Auto-refresh every 2 s")
         sig_grid, self._sig_labels = self._make_prop_grid(
             ("Registration", "RAT", "Operator", "MCC/MNC", "TAC", "Cell ID",
@@ -501,6 +521,281 @@ class MainWindow(Adw.ApplicationWindow):
                           "ok" if rc == 0 else "err")
             GLib.idle_add(self._apn_status_row.set_subtitle,
                           f"last: {cmd} -> exit {rc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _build_networks_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        page.set_title("Networks")
+
+        group = Adw.PreferencesGroup()
+        group.set_title("ofono scripts")
+        group.set_description(
+            "Runs python scripts from /usr/share/ofono/scripts against the "
+            "selected modem (get-operators = scanned networks, like "
+            "mmcli --3gpp-scan; a fresh scan needs Mode manual first)")
+        self._script_list = Gtk.StringList()
+        self._script_combo = Adw.ComboRow()
+        self._script_combo.set_title("Script")
+        self._script_combo.set_model(self._script_list)
+        group.add(self._script_combo)
+
+        self._script_args_row = Adw.EntryRow()
+        self._script_args_row.set_title("Arguments")
+        group.add(self._script_args_row)
+
+        run_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        run_box.set_margin_top(8)
+        run_box.set_margin_bottom(8)
+        scan_btn = Gtk.Button(label="Scan")
+        scan_btn.add_css_class("suggested-action")
+        scan_btn.set_tooltip_text(
+            "Mode manual (COPS=2) -> poll get-operators -> Mode auto")
+        scan_btn.connect("clicked", lambda *_: self._on_network_scan())
+        run_box.append(scan_btn)
+        run_btn = Gtk.Button(label="Run")
+        run_btn.connect("clicked", lambda *_: self._on_run_script())
+        run_box.append(run_btn)
+        row = Adw.ActionRow()
+        row.set_activatable_widget(run_box)
+        row.add_suffix(run_box)
+        group.add(row)
+
+        self._script_status_row = Adw.ActionRow()
+        self._script_status_row.set_title("Status")
+        self._script_status_row.set_subtitle("idle")
+        group.add(self._script_status_row)
+        page.add(group)
+
+        self._script_out = Gtk.TextView(
+            editable=False, monospace=True, cursor_visible=False,
+            wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        self._script_out.add_css_class("monospace")
+        out_scrolled = Gtk.ScrolledWindow()
+        out_scrolled.set_child(self._script_out)
+        out_scrolled.set_policy(Gtk.PolicyType.AUTOMATIC,
+                                Gtk.PolicyType.AUTOMATIC)
+        out_scrolled.set_vexpand(True)
+        out_scrolled.set_size_request(-1, 300)
+        out_group = Adw.PreferencesGroup()
+        out_group.set_title("Output")
+        out_group.add(out_scrolled)
+        page.add(out_group)
+
+        self._load_scripts()
+        return page
+
+    OFONO_SCRIPTS_DIR = "/usr/share/ofono/scripts"
+    # scan: mode manual -> poll get-operators -> mode auto
+    _scan_thread: threading.Thread | None = None
+    _scan_cancel = False
+
+    def _load_scripts(self) -> None:
+        try:
+            names = sorted(
+                n for n in os.listdir(self.OFONO_SCRIPTS_DIR)
+                if os.path.isfile(os.path.join(self.OFONO_SCRIPTS_DIR, n))
+                and not n.endswith((".pyc", ".conf")) and "test-" not in n)
+        except OSError as e:
+            self._set_script_status(f"cannot list scripts: {e}")
+            return
+        self._script_list.splice(0, self._script_list.get_n_items(), names)
+        if "get-operators" in names:
+            self._script_combo.set_selected(names.index("get-operators"))
+
+    def _set_script_status(self, text: str) -> None:
+        GLib.idle_add(self._script_status_row.set_subtitle, text)
+
+    def _set_script_output(self, text: str) -> None:
+        def apply():
+            self._script_out.get_buffer().set_text(text, -1)
+        GLib.idle_add(apply)
+
+    def _run_ofono_script(self, name: str, args: str):
+        path = os.path.join(self.OFONO_SCRIPTS_DIR, name)
+        # ofono script convention: argv[1] = modem path, rest = script args
+        argv = ["python3", path]
+        if self.modem:
+            argv.append(self.modem.path)
+        argv += shlex.split(args) if args else []
+        self._set_script_status(f"running: {name} {args}".strip())
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=120)
+        except Exception as e:  # noqa: BLE001
+            self._set_script_status(f"error: {e}")
+            self._set_script_output(str(e))
+            return None
+        out = (proc.stdout + ("\n" + proc.stderr if proc.stderr else "")).strip()
+        self._set_script_status(f"{name} -> exit {proc.returncode}")
+        self._set_script_output(out or "(no output)")
+        return proc
+
+    def _on_run_script(self) -> None:
+        item = self._script_combo.get_selected_item()
+        if item is None:
+            self._set_script_status("no script selected")
+            return
+
+        def worker():
+            self._run_ofono_script(
+                item.get_string(), self._script_args_row.get_text().strip())
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_network_scan(self) -> None:
+        if not self.modem:
+            self._set_script_status("no modem selected")
+            return
+        if self._scan_thread and self._scan_thread.is_alive():
+            self._scan_cancel = True
+            self._set_script_status("scan stopped")
+            return
+        self._scan_cancel = False
+        self._set_script_output("Mode manual — scanning...")
+
+        def worker():
+            m = self.modem
+            try:
+                m.command("AT+COPS=2", timeout=15)
+                seen = ""
+                for _ in range(12):
+                    if self._scan_cancel:
+                        break
+                    time.sleep(5)
+                    proc = self._run_ofono_script("get-operators", "")
+                    out = (proc.stdout or "") if proc else ""
+                    if len(out) > len(seen):
+                        seen = out
+                        GLib.idle_add(self._set_script_output, out.strip())
+                if not seen:
+                    GLib.idle_add(self._set_script_output,
+                                  "no operators found (SIM forbidden or no "
+                                  "coverage) — cached list may also be empty")
+            except Exception as e:  # noqa: BLE001
+                self._set_script_status(f"scan failed: {e}")
+            finally:
+                try:
+                    m.command("AT+COPS=0", timeout=15)
+                except Exception:  # noqa: BLE001
+                    pass
+        self._scan_thread = threading.Thread(target=worker, daemon=True)
+        self._scan_thread.start()
+
+    def _build_mmcli_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        page.set_title("mmcli")
+
+        group = Adw.PreferencesGroup()
+        group.set_title("mmcli commands")
+        group.set_description(
+            "Runs mmcli against '-m 0'. --3gpp-scan needs Mode manual and "
+            "can take ~60 s; the modem is left in auto afterwards")
+        self._mm_preset_list = Gtk.StringList()
+        self._mm_combo = Adw.ComboRow()
+        self._mm_combo.set_title("Preset")
+        self._mm_combo.set_model(self._mm_preset_list)
+        for label, args in MMCLI_PRESETS:
+            self._mm_preset_list.append(f"{label}  ({args})")
+        self._mm_combo.set_selected(0)
+        self._mm_combo.connect("notify::selected", self._on_mm_preset_changed)
+        group.add(self._mm_combo)
+
+        self._mm_args_row = Adw.EntryRow()
+        self._mm_args_row.set_title("mmcli args")
+        self._mm_args_row.set_text(MMCLI_PRESETS[0][1])
+        self._mm_args_row.set_show_apply_button(True)
+        self._mm_args_row.connect("apply", self._on_run_mmcli)
+        group.add(self._mm_args_row)
+
+        run_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        run_box.set_margin_top(8)
+        run_box.set_margin_bottom(8)
+        run_btn = Gtk.Button(label="Run")
+        run_btn.add_css_class("suggested-action")
+        run_btn.connect("clicked", self._on_run_mmcli)
+        run_box.append(run_btn)
+        self._mm_cancel_btn = Gtk.Button(label="Cancel")
+        self._mm_cancel_btn.set_visible(False)
+        self._mm_cancel_btn.connect("clicked", self._on_cancel_mmcli)
+        run_box.append(self._mm_cancel_btn)
+        row = Adw.ActionRow()
+        row.set_activatable_widget(run_box)
+        row.add_suffix(run_box)
+        group.add(row)
+
+        self._mm_status_row = Adw.ActionRow()
+        self._mm_status_row.set_title("Status")
+        self._mm_status_row.set_subtitle("idle")
+        group.add(self._mm_status_row)
+        page.add(group)
+
+        self._mm_out = Gtk.TextView(editable=False, monospace=True,
+                                    cursor_visible=False,
+                                    wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        self._mm_out.add_css_class("monospace")
+        out_scrolled = Gtk.ScrolledWindow()
+        out_scrolled.set_child(self._mm_out)
+        out_scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        out_scrolled.set_vexpand(True)
+        out_scrolled.set_size_request(-1, 300)
+        out_group = Adw.PreferencesGroup()
+        out_group.set_title("Output")
+        out_group.add(out_scrolled)
+        page.add(out_group)
+        return page
+
+    _mm_proc: subprocess.Popen | None = None
+
+    def _on_mm_preset_changed(self, *_args) -> None:
+        item = self._mm_combo.get_selected_item()
+        if item is None:
+            return
+        args = MMCLI_PRESETS[self._mm_combo.get_selected()][1]
+        self._mm_args_row.set_text(args)
+
+    def _set_mm_status(self, text: str) -> None:
+        GLib.idle_add(self._mm_status_row.set_subtitle, text)
+
+    def _set_mm_output(self, text: str) -> None:
+        def apply():
+            self._mm_out.get_buffer().set_text(text, -1)
+        GLib.idle_add(apply)
+
+    def _on_cancel_mmcli(self, *_args) -> None:
+        if self._mm_proc and self._mm_proc.poll() is None:
+            self._mm_proc.kill()
+            self._set_mm_status("cancelled")
+
+    def _on_run_mmcli(self, *_args) -> None:
+        if self._mm_proc and self._mm_proc.poll() is None:
+            self._set_mm_status("already running — cancel first")
+            return
+        args = shlex.split(self._mm_args_row.get_text().strip())
+        if not args:
+            self._set_mm_status("no arguments")
+            return
+        self._set_mm_output("$ mmcli " + " ".join(args))
+        self._set_mm_status("running…")
+        self._mm_cancel_btn.set_visible(True)
+
+        def worker():
+            try:
+                proc = subprocess.Popen(["mmcli"] + args,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True)
+                self._mm_proc = proc
+                out = proc.communicate(timeout=120)[0].strip()
+                rc = proc.returncode
+            except Exception as e:  # noqa: BLE001
+                self._set_mm_status(f"error: {e}")
+                self._set_mm_output(str(e))
+                GLib.idle_add(self._mm_cancel_btn.set_visible, False)
+                return
+            finally:
+                self._mm_proc = None
+            self._set_mm_status(f"mmcli {' '.join(args)} -> exit {rc}")
+            self._set_mm_output(out or "(no output)")
+            GLib.idle_add(self._mm_cancel_btn.set_visible, False)
 
         threading.Thread(target=worker, daemon=True).start()
 
