@@ -17,9 +17,11 @@ deploys by `scp`-ing the files to `furios@<phone>`.
 ```
 furimodem-tool/
 ├── furimodem-tool.py       # entry point (Adw.Application)
-├── ui.py                   # MainWindow + App + all UI (~632 lines)
-├── ofono.py                # OfonoModem, OfonoMonitor, DBus setup
-├── parsers.py              # AT response parsers (parse_cesq, parse_cereg, etc.)
+├── ui.py                   # MainWindow + App + all UI (~1318 lines)
+├── ofono.py                # OfonoModem, OfonoMonitor, DBus setup (~187 lines)
+├── parsers.py              # AT response parsers (parse_cesq, parse_cereg,
+│                           #   parse_cops, parse_ecell, parse_ecellmeas,
+│                           #   parse_eimsgeo) (~223 lines)
 ├── furimodem-tool.desktop  # phosh launcher entry
 ├── icons/furimodem-tool.svg # app icon
 ├── README.md               # user-facing docs
@@ -38,7 +40,8 @@ path on the phone.
 | Nickname | Host                | Notes                                |
 |----------|---------------------|--------------------------------------|
 | `casa`   | `furios@10.1.2.151` | Home Wi-Fi                           |
-| `t3`     | `furios@10.205.52.43` | T3 mobile hotspot (current)         |
+| `t3`     | `furios@10.205.52.43` | T3 mobile hotspot (stale)           |
+| `cur`    | `furios@10.15.19.82` | Current access point (2026-10-04)   |
 
 - User home: `/home/furios/`
 - Python: `/usr/bin/python3` (3.13)
@@ -65,26 +68,33 @@ The `.desktop` uses `Icon=furimodem-tool` (name, not path) so the hicolor theme
 resolves it. `StartupWMClass=es.n0p.furimodem_tool` matches the GTK
 `application_id` so the window is grouped correctly.
 
-## UI Layout (Adw.OverlaySplitView)
+## UI Layout (Adw.OverlaySplitView + Adw.ViewStack / ViewSwitcherBar)
 
 - **Sidebar**: modem selector, log, history (AT command history rows).
-- **Tab 1 — Status**: modem info (Manufacturer, Model, Revision, IMEI, IMSI, Online, Powered, Type, Operator, Registration, Tech, Strength) + 5G signal rows (RAT, MCC/MNC, TAC, Cell ID, RSRP, RSRQ, RSSI, SINR, RXLEV, RSCP, ECNO). Also shows refresh button and Operator/Registration from the sidebar.
+- **Tab 1 — Status**: modem info (Manufacturer, Model, Revision, IMEI, IMSI, Online, Powered, Type, Operator, Registration, Tech, Strength) + 5G signal rows (RAT, MCC/MNC, TAC, Cell ID, RSRP, RSRQ, RSSI, SINR, RXLEV, RSCP, ECNO) fed by polling `AT+CESQ` + `AT+CEREG?` every 2s (`POLL_INTERVAL_S`). Serving/neighbour cell blocks parsed from `AT+ECELLMEAS=1` / `AT+ECELL`.
 - **Tab 2 — APN**: current SIM block (Operator, MCC/MNC, IMSI, ICCID of the inserted card), PDP context selector + editable APN EntryRow with Refresh / Apply / from XML buttons (Apply → `ConnectionContext.SetProperty("AccessPointName")`; from XML → `ConnectionContext.ProvisionContext` which re-applies the serviceproviders.xml entry matching the SIM MCC/MNC), and a Services block with confirm-guarded "Restart oFono" (`setprop vendor.ril.mtk.restart 1`, no root needed) and "Restart ModemManager" (`sudo -n systemctl restart ModemManager.service`). Keep context-button labels short — long labels overflow the phone screen.
-- **Tab 2 — Positioning**: removed (see commit "Drop positioning tab").
-- **Tab 3 — Terminal**: AT command input (EntryRow + timeout SpinRow + Send button + Clear log button) + AT preset buttons + log TextView + history rows.
-- **HeaderBar**: title, refresh modem button, sidebar toggle.
+- **Tab 3 — Networks**: runner for the python scripts in `/usr/share/ofono/scripts` (`OFONO_SCRIPTS_DIR`) against the selected modem — script ComboRow (auto-listed, default `get-operators`) + free Arguments EntryRow + Run button. `argv[1]` is always the modem path (ofono script convention). "Scan" button runs the operator-scan flow in a worker thread: `AT+COPS=2` (manual) → poll `get-operators` ×12 every 5s → `AT+COPS=0` in `finally`; clicking Scan again cancels. Output goes to a read-only TextView.
+- **Tab 4 — mmcli**: runs `mmcli` with preset args (`MMCLI_PRESETS` in ui.py: 3GPP scan, Status, `-L`, Signal quality, Simple status, Location) or free args, Cancel button, output TextView. Always pin `-m 0` — `-m any` crashes libmm-glib with the ofono2mm backend.
+- **Tab 5 — Terminal**: AT command input (EntryRow + timeout SpinRow + Send button + Clear log button) + compact AT preset FlowBox (label + description, 2 lines per button) + log TextView + history rows. Destructive presets (`AT+EPOF`, `AT+EPON`, `AT+ESLP=1`) are confirm-guarded.
+- **Tab "Positioning"**: removed (see commit "Drop positioning tab"); ELOCAEN / cell-location commands live as Terminal presets.
+- **HeaderBar**: title + modem-path subtitle, refresh modem button, sidebar toggle. Bottom `Adw.ViewSwitcherBar` for tab switching.
 
 ## oFono interfaces used
 
 | Interface                            | Purpose                                        |
 |--------------------------------------|------------------------------------------------|
-| `org.ofono.Manager`                  | Enumerate modems via `GetModems()`             |
-| `org.ofono.Modem`                    | Manufacturer, Model, Revision, Serial, Online  |
-| `org.freedesktop.DBus.Properties`    | Property reads + change notifications          |
+| `org.ofono.Manager`                  | Enumerate modems via `GetModems()` + add/remove signals (`OfonoMonitor`) |
+| `org.ofono.Modem`                    | Manufacturer, Model, Revision, Serial, Type, Online, Powered |
+| `org.ofono.NetworkRegistration`      | Name, Code, Status, Technology, CellId, MCC/MNC, Strength |
+| `org.ofono.SimManager`               | IMSI (`SubscriberIdentity`), ICCID (`CardIdentifier`) |
 | `org.ofono.FuriLabs.AT`              | `SendCommand(s) -> s` raw AT passthrough       |
-| `org.ofono.Modem.Network`            | Operator, registration, technology             |
-| `org.ofono.Modem.Signal`             | Signal %, BER, RAT                             |
-| `org.ofono.Modem.SimManager`         | IMEI (from SIM serial)                         |
+| `org.ofono.ConnectionManager`        | `GetContexts() -> a{oa{sv}}` PDP context enumeration |
+| `org.ofono.ConnectionContext`        | `SetProperty(sv)` APN edit, `ProvisionContext()` XML re-apply |
+| `org.freedesktop.DBus.Properties`    | Property reads (`GetAll`) + change notifications |
+
+Property reads go through each interface's native `GetProperties`/`GetAll`
+(`ofono.py:OfonoModem.get_all`). Missing fields fall back to AT commands
+(`AT+CGMI`, `AT+CGMM`, `AT+CGSN`, `AT+CIMI`) cached in `_at_cache`.
 
 Verify with:
 
@@ -94,14 +104,24 @@ busctl introspect org.ofono /ril_0 org.ofono.FuriLabs.AT
 
 ## AT command presets (in `_build_terminal_page`)
 
+Compact FlowBox of `(label, description, command)` tuples:
 `ATI`, `AT+CGMI`, `AT+CGMM`, `AT+CGMR`, `AT+CGSN`, `AT+CIMI`,
 `AT+COPS?`, `AT+CESQ`, `AT+ECSQ`, `AT+CREG?`, `AT+CEREG?`,
-`AT+C5GREG?`, `AT+GCAP`, `AT+QENG="servingcell"`, `AT+QCAINFO`,
-`AT+ECID`, `AT+CGATT?`, `AT+CPIN?`.
+`AT+C5GREG?`, `AT+GCAP`, `AT+ECID`, `AT+CGATT?`, `AT+CPIN?`,
+`AT+EXOPL` (full op scan), `AT+EPRATL?`, `AT+E5GOPT?`, `AT+ERAT?`,
+`AT+ECAINFO?` (carrier agg), `AT+ENRCABAND?`, `AT+ECCAUSE?` (reject
+cause), `AT+EONS?`, `AT+ELCE?`, `AT+ECELCK?`, `AT+EPOF` (power off!),
+`AT+ESLP?`. Commands in `DISRUPTIVE` (`AT+EPOF`, `AT+EPON`,
+`AT+ESLP=1`) require confirmation. The preset set uses the E-prefixed
+commands (`ECSQ`, `ECELL`, `EPOF`, …) the FuriLabs RIL answers — the
+Quectel `QENG`/`QCAINFO` forms from the reference PDF were dropped from
+the presets/parsers (see commits "Serving + neighbour cells, ECELL RSRP
+fix, new AT presets" onward).
 
-`AT+QENG="servingcell"` is parsed by `parse_qeng_servingcell()` for
-RSRP/RSRQ/SINR/band/ARFCN/PCI/MCC/MNC/cell ID. `AT+ECSQ` is parsed by
-`parse_ecsq()`.
+Parsers in `parsers.py`: `parse_cesq` (signal poll), `parse_cereg`
+(registration/TAC), `parse_cops`, `parse_ecellmeas` + `parse_ecell`
+(serving + neighbour cells: RSRP/RSRQ/SINR/PCI/Band/ARFCN),
+`parse_eimsgeo`, `strip_at_response`.
 
 ## Known issues / non-fatal warnings
 
@@ -124,13 +144,26 @@ Icon resolution check:
 ssh furios@<host> 'python3 -c "import gi; gi.require_version(\"Gtk\",\"3.0\"); from gi.repository import Gtk; t=Gtk.IconTheme.get_default(); print(t.lookup_icon(\"furimodem-tool\", 128, 0).get_filename())"'
 ```
 
-Run app and take screenshot:
+Run app and take screenshot (use the current host; `shotman` panics —
+see Round 4 notes for the working gdbus screenshot command):
 
 ```sh
-ssh furios@10.205.52.43 'setsid WAYLAND_DISPLAY=wayland-0 python3 /home/furios/5g-at-tool/furimodem-tool.py &' && sleep 3 && ssh furios@10.205.52.43 'shotman -c output' && scp furios@10.205.52.43:~/Pictures/*.png . && ssh furios@10.205.52.43 'pkill -9 python3; rm ~/Pictures/*.png'
+ssh furios@10.15.19.82 'setsid XDG_RUNTIME_DIR=/run/user/32011 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/32011/bus WAYLAND_DISPLAY=wayland-0 python3 /home/furios/5g-at-tool/furimodem-tool.py &'
 ```
 
 ## Bugs fixed
+
+### Round 5 (Networks + mmcli tabs)
+- `mmcli -m any` crashes libmm-glib with the ofono2mm backend — always pin
+  `-m 0` (the modem is always `/Modem/0`). Comment at `MMCLI_PRESETS`.
+- Long mmcli/scan commands run in daemon threads (`subprocess.Popen` +
+  `communicate(timeout=120)`) with a Cancel button; UI updates go through
+  `GLib.idle_add` — never touch widgets from the worker thread.
+- Operator scan must leave the modem in auto: `AT+COPS=0` runs in
+  `finally` even if the `get-operators` polling throws. `get-operators`
+  returns a cached list — a fresh scan needs `AT+COPS=2` first.
+- ofono scripts convention: `argv[1]` = modem D-Bus path, rest = script
+  args; run with `python3 /usr/share/ofono/scripts/<name>`.
 
 ### Round 4 (APN tab)
 - FuriLabs ofono does NOT expose `Manager.GetObjectsAndInterfaces` (returns
