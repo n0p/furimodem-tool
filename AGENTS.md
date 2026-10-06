@@ -109,6 +109,7 @@ Compact FlowBox of `(label, description, command)` tuples:
 `AT+COPS?`, `AT+CESQ`, `AT+ECSQ`, `AT+CREG?`, `AT+CEREG?`,
 `AT+C5GREG?`, `AT+GCAP`, `AT+ECID`, `AT+CGATT?`, `AT+CPIN?`,
 `AT+EXOPL` (full op scan), `AT+EPRATL?`, `AT+E5GOPT?`, `AT+ERAT?`,
+`AT+ERAT=19` (enable 4G+5G / 5G SA),
 `AT+ECAINFO?` (carrier agg), `AT+ENRCABAND?`, `AT+ECCAUSE?` (reject
 cause), `AT+EONS?`, `AT+ELCE?`, `AT+ECELCK?`, `AT+EPOF` (power off!),
 `AT+ESLP?`. Commands in `DISRUPTIVE` (`AT+EPOF`, `AT+EPON`,

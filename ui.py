@@ -859,6 +859,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("EPRATL", "RAT list pref", "AT+EPRATL?"),
             ("E5GOPT?", "5G mode cfg", "AT+E5GOPT?"),
             ("ERAT?", "Query RAT", "AT+ERAT?"),
+            ("ERAT=19", "Enable 4G+5G / 5G SA", "AT+ERAT=19"),
             ("ECAINFO", "Carrier agg", "AT+ECAINFO?"),
             ("ENRCABAND", "NR band info", "AT+ENRCABAND?"),
             ("ECCAUSE", "Reject cause", "AT+ECCAUSE?"),
