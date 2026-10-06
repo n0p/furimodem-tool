@@ -5,12 +5,14 @@ and a content area with an Adw.ViewStack (Status, Positioning, Terminal).
 """
 
 import os
+import re
 import shlex
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime
 
 import dbus
 import gi
@@ -39,6 +41,70 @@ from parsers import (
 LOG_MAX = 5000
 HISTORY_MAX = 200
 POLL_INTERVAL_S = 2
+
+# logcat tab: /usr/sbin/logcat on FuriOS is a halium-lxc-exec wrapper that
+# must run as root (furios has NOPASSWD sudo). Radio logs are very verbose,
+# so the in-memory ring buffer is capped by total bytes.
+LOGCAT_BIN = "/usr/sbin/logcat"
+LOGCAT_FILTER_TERMS = ("PDN", "CME", "RMC", "IMS")
+LOGCAT_RING_MAX_BYTES = 256 * 1024
+LOGCAT_RENDER_INTERVAL_MS = 250
+
+
+class _LogcatRing:
+    """Byte-capped ring of log lines with a monotonic generation counter.
+
+    append() runs on the reader thread, snapshot()/clear() on the UI thread;
+    a lock keeps them consistent. Evicted lines retire by generation so the
+    renderer can detect when it fell behind.
+    """
+
+    def __init__(self, max_bytes: int):
+        self._lines: deque[str] = deque()
+        self._bytes = 0
+        self._max = max_bytes
+        self._head_gen = 0     # generation of _lines[0]
+        self._total = 0        # generation of the next appended line
+        self._lock = threading.Lock()
+
+    def append(self, line: str) -> None:
+        with self._lock:
+            self._lines.append(line)
+            self._bytes += len(line) + 1
+            self._total += 1
+            while self._bytes > self._max and len(self._lines) > 1:
+                self._bytes -= len(self._lines.popleft()) + 1
+                self._head_gen += 1
+
+    def snapshot(self) -> tuple[int, int, list[str]]:
+        """(head_gen, total_gen, lines)"""
+        with self._lock:
+            return self._head_gen, self._total, list(self._lines)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._lines.clear()
+            self._bytes = 0
+            self._head_gen = self._total
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._lines)
+
+
+def _grep_context_flags(lines: list[str], regex: re.Pattern | None,
+                        ctx: int) -> list[bool]:
+    """egrep-style: a line is shown if it matches or sits within ctx lines
+    of a match."""
+    if regex is None:
+        return [True] * len(lines)
+    hits = [bool(regex.search(l)) for l in lines]
+    shown = [False] * len(lines)
+    for i, hit in enumerate(hits):
+        if hit:
+            for j in range(max(0, i - ctx), min(len(lines), i + ctx + 1)):
+                shown[j] = True
+    return shown
 
 # mmcli presets ('-m any' crashes libmm-glib with the ofono2mm backend —
 # the modem is always /Modem/0, so pin it)
@@ -94,6 +160,10 @@ class MainWindow(Adw.ApplicationWindow):
         GLib.timeout_add_seconds(POLL_INTERVAL_S, self._poll_signal)
         self._refresh_modem_list()
 
+    def do_destroy(self) -> None:
+        self.stop_logcat()
+        super().do_destroy()
+
     def _build_ui(self) -> None:
         split_view = Adw.OverlaySplitView()
         split_view.set_show_sidebar(True)
@@ -121,16 +191,19 @@ class MainWindow(Adw.ApplicationWindow):
         net_page = self._build_networks_page()
         mmcli_page = self._build_mmcli_page()
         terminal_page = self._build_terminal_page()
+        logcat_page = self._build_logcat_page()
         self._view_stack.add_titled(status_page, "status", "Status")
         self._view_stack.add_titled(apn_page, "apn", "APN")
         self._view_stack.add_titled(net_page, "networks", "Networks")
         self._view_stack.add_titled(mmcli_page, "mmcli", "mmcli")
         self._view_stack.add_titled(terminal_page, "terminal", "Terminal")
+        self._view_stack.add_titled(logcat_page, "logcat", "logcat")
         status_page.set_icon_name("network-cellular-signal-good-symbolic")
         apn_page.set_icon_name("network-workgroup-symbolic")
         net_page.set_icon_name("network-cellular-connected-symbolic")
         mmcli_page.set_icon_name("system-search-symbolic")
         terminal_page.set_icon_name("utilities-terminal-symbolic")
+        logcat_page.set_icon_name("text-editor-symbolic")
 
         switcher_bar = Adw.ViewSwitcherBar()
         switcher_bar.set_stack(self._view_stack)
@@ -798,6 +871,281 @@ class MainWindow(Adw.ApplicationWindow):
             GLib.idle_add(self._mm_cancel_btn.set_visible, False)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # logcat tab (radio buffer)
+    # ------------------------------------------------------------------
+
+    def _build_logcat_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        page.set_title("logcat")
+
+        self._lc_ring = _LogcatRing(LOGCAT_RING_MAX_BYTES)
+        self._lc_proc: subprocess.Popen | None = None
+        self._lc_stop = threading.Event()
+        self._lc_regex: re.Pattern | None = None
+        self._lc_dirty = False
+        self._lc_autoscroll = True
+        self._lc_suppress_scroll_flag = False
+        self._lc_last_filter = None
+        self._lc_seen_head: int | None = None
+        self._lc_seen_total = 0
+        self._lc_appended_total: int | None = None
+
+        ctrl_group = Adw.PreferencesGroup()
+        ctrl_group.set_title("logcat -b radio")
+
+        self._lc_toggle = Adw.SwitchRow()
+        self._lc_toggle.set_title("Capture")
+        self._lc_toggle.set_subtitle("stopped")
+        self._lc_toggle.set_tooltip_text(
+            "Runs 'sudo logcat -b radio' continuously while enabled")
+        self._lc_toggle.connect("notify::active", self._on_lc_toggle)
+        ctrl_group.add(self._lc_toggle)
+
+        filter_row = Adw.ActionRow()
+        filter_row.set_title("Filter")
+        filter_row.set_tooltip_text(
+            "Toggle terms; equivalent to egrep 'A|B|C' — none active = show all")
+        fbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._lc_filter_btns: dict[str, Gtk.ToggleButton] = {}
+        for term in LOGCAT_FILTER_TERMS:
+            tb = Gtk.ToggleButton(label=term)
+            tb.add_css_class("caption")
+            tb.connect("toggled", self._on_lc_filter_toggled)
+            fbox.append(tb)
+            self._lc_filter_btns[term] = tb
+        filter_row.add_suffix(fbox)
+        filter_row.set_activatable_widget(fbox)
+        ctrl_group.add(filter_row)
+
+        self._lc_ctx_row = Adw.SpinRow.new_with_range(0, 99, 1)
+        self._lc_ctx_row.set_title("Context lines (-C)")
+        self._lc_ctx_row.set_value(1)
+        self._lc_ctx_row.set_numeric(True)
+        self._lc_ctx_row.get_adjustment().connect(
+            "value-changed", self._on_lc_filter_toggled)
+        ctrl_group.add(self._lc_ctx_row)
+
+        btn_row = Adw.ActionRow()
+        bb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        save_btn = Gtk.Button(label="Save log")
+        save_btn.add_css_class("suggested-action")
+        save_btn.set_tooltip_text(
+            "Save the visible (filtered) buffer to ~/logcat-radio-<date>.log")
+        save_btn.connect("clicked", self._on_lc_save)
+        bb.append(save_btn)
+        clear_btn = Gtk.Button(label="Clear")
+        clear_btn.connect("clicked", self._on_lc_clear)
+        bb.append(clear_btn)
+        btn_row.add_suffix(bb)
+        btn_row.set_activatable_widget(bb)
+        ctrl_group.add(btn_row)
+        page.add(ctrl_group)
+
+        out_group = Adw.PreferencesGroup()
+        out_group.set_title("Radio buffer (last 256 kB)")
+        self._lc_view = Gtk.TextView(editable=False, monospace=True,
+                                     cursor_visible=False,
+                                     wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        self._lc_view.add_css_class("monospace")
+        self._lc_view.add_css_class("caption")   # small but legible font
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_child(self._lc_view)
+        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.ALWAYS)
+        scrolled.set_vexpand(True)
+        scrolled.set_size_request(-1, 320)
+        scrolled.get_vadjustment().connect("value-changed",
+                                           self._on_lc_scroll_changed)
+        out_group.add(scrolled)
+        page.add(out_group)
+
+        self._lc_render_tag = GLib.timeout_add(
+            LOGCAT_RENDER_INTERVAL_MS, self._lc_render_tick)
+        return page
+
+    def _on_lc_scroll_changed(self, adj: Gtk.Adjustment) -> None:
+        # ignore the value-changed events our own scroll-to-bottom causes
+        if self._lc_suppress_scroll_flag:
+            self._lc_suppress_scroll_flag = False
+            return
+        # remember manual position only while capture is off; with capture
+        # enabled the view is always pinned to the newest line
+        if not self._lc_toggle.get_active():
+            self._lc_autoscroll = (adj.get_value()
+                                   >= adj.get_upper() - adj.get_page_size() - 4)
+
+    def _set_lc_status(self, text: str) -> None:
+        GLib.idle_add(self._lc_toggle.set_subtitle, text)
+
+    def _lc_active_terms(self) -> list[str]:
+        return [t for t, b in self._lc_filter_btns.items() if b.get_active()]
+
+    def _on_lc_filter_toggled(self, *_args) -> None:
+        terms = self._lc_active_terms()
+        n = int(self._lc_ctx_row.get_value())
+        if terms:
+            self._lc_regex = re.compile(
+                "|".join(re.escape(t) for t in terms))
+            desc = f"filter: {'|'.join(terms)}  -C{n}"
+        else:
+            self._lc_regex = None
+            desc = ""
+        self._lc_last_filter = None  # force rerender
+        GLib.idle_add(self._lc_render_tick)
+        if self._lc_proc and self._lc_proc.poll() is None:
+            self._set_lc_status(f"running — {desc}" if desc else "running")
+
+    def _on_lc_toggle(self, *_args) -> None:
+        if self._lc_toggle.get_active():
+            self._lc_autoscroll = True
+            self._lc_stop.clear()
+            t = threading.Thread(target=self._lc_worker, daemon=True)
+            t.start()
+        else:
+            self._lc_stop.set()
+            proc = self._lc_proc
+            if proc and proc.poll() is None:
+                # sudo forwards TERM to the wrapper, but the inner
+                # halium-lxc-exec/logcat can linger — sweep by name too
+                try:
+                    subprocess.run(["sudo", "-n", "pkill", "-f",
+                                    "[l]ogcat -b radio"], timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+                proc.terminate()
+            self._set_lc_status("stopped")
+
+    def _lc_worker(self) -> None:
+        def pump(stream):
+            for raw in iter(stream.readline, b""):
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if self._lc_stop.is_set():
+                    break
+                self._lc_ring.append(line)
+                self._lc_dirty = True
+            stream.close()
+
+        try:
+            self._set_lc_status("starting sudo logcat -b radio…")
+            proc = subprocess.Popen(
+                ["sudo", "-n", LOGCAT_BIN, "-b", "radio"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL)
+            self._lc_proc = proc
+            GLib.idle_add(self._on_lc_filter_toggled)  # read widgets on UI thread
+            t = threading.Thread(target=pump, args=(proc.stdout,),
+                                 daemon=True)
+            t.start()
+            rc = proc.wait()
+            t.join(timeout=2)
+            if not self._lc_stop.is_set():
+                self._set_lc_status(f"logcat exited (code {rc})")
+                GLib.idle_add(self._lc_toggle.set_active, False)
+        except Exception as e:  # noqa: BLE001
+            self._set_lc_status(f"error: {e}")
+            GLib.idle_add(self._lc_toggle.set_active, False)
+        finally:
+            self._lc_proc = None
+
+    def _lc_render_tick(self) -> bool:
+        if not self._lc_dirty:
+            return True
+        self._lc_dirty = False
+        regex = self._lc_regex
+        ctx = int(self._lc_ctx_row.get_value())
+        key = (regex.pattern if regex else None, ctx)
+        head_gen, total_gen, lines = self._lc_ring.snapshot()
+        old_head = self._lc_seen_head
+        reset = (key != self._lc_last_filter or old_head is None
+                 or total_gen < self._lc_seen_total)
+        self._lc_seen_head = head_gen
+        self._lc_seen_total = total_gen
+        if reset or regex is not None:
+            # full rerender: filter changed, buffer cleared/restarted, or a
+            # regex is active (context lines can join old and new lines;
+            # rerendering <=256 kB every tick is cheap)
+            self._lc_last_filter = key
+            self._lc_appended_total = total_gen
+            flags = _grep_context_flags(lines, regex, ctx)
+            GLib.idle_add(self._lc_set_text,
+                          "\n".join(l for l, s in zip(lines, flags) if s))
+            return True
+        # no filter: trim evicted lines off the top, append the new ones
+        if old_head is not None and head_gen > old_head:
+            GLib.idle_add(self._lc_delete_head, head_gen - old_head)
+        new_count = total_gen - (self._lc_appended_total or 0)
+        self._lc_appended_total = total_gen
+        if new_count > 0:
+            GLib.idle_add(self._lc_append, "\n".join(lines[-new_count:]))
+        return True
+
+    def _lc_delete_head(self, n: int) -> None:
+        buf = self._lc_view.get_buffer()
+        n = min(n, buf.get_line_count() - 1)
+        if n <= 0:
+            return
+        ok, it = buf.get_iter_at_line(n)
+        if not ok:
+            return
+        buf.delete(buf.get_start_iter(), it)
+
+    def _lc_set_text(self, text: str) -> None:
+        self._lc_last_filter = (
+            self._lc_regex.pattern if self._lc_regex else None,
+            int(self._lc_ctx_row.get_value()))
+        buf = self._lc_view.get_buffer()
+        buf.set_text(text, -1)
+        self._lc_scroll_bottom()
+
+    def _lc_append(self, text: str) -> None:
+        buf = self._lc_view.get_buffer()
+        if not self._lc_last_filter:
+            self._lc_set_text(text)
+            return
+        if buf.get_line_count() > 0:
+            buf.insert(buf.get_end_iter(), "\n", -1)
+        buf.insert(buf.get_end_iter(), text, -1)
+        self._lc_scroll_bottom()
+
+    def _lc_scroll_bottom(self) -> None:
+        # while capture is enabled the view is always pinned to the newest
+        # line; when stopped, respect a manual scroll-up position
+        if not (self._lc_autoscroll or self._lc_toggle.get_active()):
+            return
+        buf = self._lc_view.get_buffer()
+        mark = buf.create_mark(None, buf.get_end_iter(), False)
+        self._lc_suppress_scroll_flag = True
+        self._lc_view.scroll_to_mark(mark, 0.0, True, 0.0, 1.0)
+        buf.delete_mark(mark)
+
+    def _on_lc_clear(self, *_args) -> None:
+        self._lc_ring.clear()
+        self._lc_dirty = True
+        self._lc_last_filter = None
+        GLib.idle_add(self._lc_render_tick)
+
+    def _on_lc_save(self, *_args) -> None:
+        buf = self._lc_view.get_buffer()
+        start, end = buf.get_bounds()
+        text = buf.get_text(start, end, False)
+        name = f"logcat-radio-{datetime.now():%Y%m%d-%H%M%S}.log"
+        path = os.path.join(os.path.expanduser("~"), name)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+            size = os.path.getsize(path)
+            self._set_lc_status(f"saved {path} ({size} bytes)")
+        except OSError as e:
+            self._set_lc_status(f"save failed: {e}")
+
+    def stop_logcat(self) -> None:
+        """Stop capture + render timer (called on window destroy)."""
+        if getattr(self, "_lc_render_tag", None):
+            GLib.source_remove(self._lc_render_tag)
+            self._lc_render_tag = None
+        if getattr(self, "_lc_toggle", None) and self._lc_toggle.get_active():
+            self._lc_toggle.set_active(False)
 
     def _build_terminal_page(self) -> Adw.PreferencesPage:
         page = Adw.PreferencesPage()

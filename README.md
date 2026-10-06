@@ -22,6 +22,12 @@ native oFono interfaces:
 - **Terminal** — free AT input with per-command timeout, color-coded
   tx/rx log, history (Up/Down + click-to-rerun), and compact preset
   buttons (destructive ones need confirmation).
+- **logcat** — live `logcat -b radio` stream (root wrapper on FuriOS)
+  behind a Capture toggle, with PDN/CME/RMC/IMS filter toggles +
+  context-lines spinner (egrep `A|B|C` with `-C##` semantics), Save-log
+  button (`~/logcat-radio-<yyyymmdd-HHMMSS>.log`) and Clear. The
+  in-memory ring is capped at 256 kB and the view uses a small
+  monospace font with bottom-pinned autoscroll.
 
 Sidebar: modem selector, log, command history. Modem hot-plug and
 property changes update the UI live (`ModemAdded/Removed`,
