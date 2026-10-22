@@ -234,6 +234,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_content(split_view)
         self._split_view = split_view
 
+        # Página inicial (debug/pruebas): FMT_PAGE=apn|status|networks|...
+        page = os.environ.get("FMT_PAGE")
+        if page:
+            self._view_stack.set_visible_child_name(page)
+
     def _subtitle_text(self) -> str:
         if not self.modem:
             return "No modem"
@@ -376,6 +381,17 @@ class MainWindow(Adw.ApplicationWindow):
             row.set_subtitle("-")
             self._apn_sim_rows[key] = row
             sim_group.add(row)
+
+        # Conmutación de SIM física (el módem tiene 2; AT+ESIMMAP).
+        self._active_sim_slot: int | None = None
+        self._sim_slot_guard = False
+        self._sim_slot_row = Adw.ComboRow()
+        self._sim_slot_row.set_title("Active SIM")
+        self._sim_slot_row.set_subtitle(
+            "Physical SIM used by the modem's stack (takes ~15 s)")
+        self._sim_slot_row.set_model(Gtk.StringList.new(["SIM 1", "SIM 2"]))
+        self._sim_slot_row.connect("notify::selected", self._on_sim_slot_changed)
+        sim_group.add(self._sim_slot_row)
         page.add(sim_group)
 
         ctx_group = Adw.PreferencesGroup()
@@ -467,9 +483,62 @@ class MainWindow(Adw.ApplicationWindow):
     def _set_apn_status(self, text: str) -> None:
         GLib.idle_add(self._apn_status_row.set_subtitle, text)
 
+    # --- conmutación de SIM --------------------------------------------------
+
+    def _on_sim_slot_changed(self, row, _param) -> None:
+        if self._sim_slot_guard or not self.modem:
+            return
+        slot = row.get_selected() + 1
+        if slot == self._active_sim_slot:
+            return
+        self._switch_sim(slot)
+
+    def _switch_sim(self, slot: int) -> None:
+        modem = self.modem
+        if modem is None:
+            return
+        self._sim_slot_guard = True
+        self._sim_slot_row.set_sensitive(False)
+        self._set_apn_status(f"Switching to SIM {slot}… (10-15 s)")
+
+        def work():
+            ok = modem.set_active_sim(slot)
+            if ok:
+                time.sleep(13)  # el módem reinicia la SIM y oFono la relee
+                try:
+                    modem._at_cache.clear()  # IMSI/ICCID cacheados
+                except Exception:
+                    pass
+            GLib.idle_add(self._after_sim_switch, slot, ok)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_sim_switch(self, slot: int, ok: bool) -> bool:
+        self._sim_slot_guard = False
+        self._sim_slot_row.set_sensitive(True)
+        if ok:
+            self._set_apn_status(
+                f"SIM {slot} active — check APN and default route")
+            self._refresh_apn_tab()
+        else:
+            self._set_apn_status(f"SIM {slot}: modem rejected the switch")
+            self._sync_sim_combo()
+        return False
+
+    def _sync_sim_combo(self) -> None:
+        if not self.modem:
+            return
+        cur = self.modem.get_active_sim()
+        self._active_sim_slot = cur
+        if cur in (1, 2):
+            self._sim_slot_guard = True
+            self._sim_slot_row.set_selected(cur - 1)
+            self._sim_slot_guard = False
+
     def _refresh_apn_tab(self) -> None:
         if not self.modem:
             return
+        self._sync_sim_combo()
         info = self.modem.get_modem_info()
         rows = self._apn_sim_rows
         op = self._fmt(info.get("operator_name")) or "-"

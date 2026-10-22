@@ -107,6 +107,34 @@ class OfonoModem:
             return "\n".join(str(x) for x in reply)
         return str(reply)
 
+    # --- conmutación de SIM (módem MT6877: 2 SIM físicas) -----------------
+    def get_active_sim(self) -> int | None:
+        """SIM física activa (1 o 2) según AT+ESIMMAP? -> '+ESIMMAP: 1'."""
+        try:
+            out = self.command("AT+ESIMMAP?", timeout=8)
+        except Exception:
+            return None
+        m = re.search(r"\+ESIMMAP:\s*(\d+)", out)
+        return int(m.group(1)) if m else None
+
+    def set_active_sim(self, slot: int) -> bool:
+        """Conmuta la SIM física activa.
+
+        El módem mapea su pila lógica 1 a una SIM física con
+        AT+ESIMMAP=<sim_pila1>,<sim_pila2>: (1,2) = SIM1, (2,1) = SIM2.
+        El módem escribe NVRAM (+CNVRM) y reinicia la SIM; oFono tarda
+        unos 10-15 s en releerla.
+        """
+        if slot not in (1, 2):
+            raise ValueError("slot debe ser 1 o 2")
+        mapping = "1,2" if slot == 1 else "2,1"
+        try:
+            out = self.command(f"AT+ESIMMAP={mapping}", timeout=15)
+        except Exception:
+            return False
+        return "OK" in out
+
+
     def get_modem_info(self, command_timeout: int = 5) -> dict:
         info: dict = {}
         mp = self.get_all(OFONO_MODEM_IFACE)
@@ -132,6 +160,24 @@ class OfonoModem:
             sp = self.get_all(OFONO_SIM_IFACE)
             info["imsi"] = str(sp.get("SubscriberIdentity", ""))
             info["iccid"] = str(sp.get("CardIdentifier", ""))
+        # oFono no relee la tarjeta tras cambiar de SIM (AT+ESIMMAP): IMSI e
+        # ICCID se piden al módem y se usan como fuente de verdad.
+        for label, cmd in (("imsi", "AT+CIMI"), ("iccid", "AT+ICCID")):
+            cached = self._at_cache.get(cmd)
+            if cached is not None:
+                info[label] = cached
+                continue
+            try:
+                value = strip_at_response(self.command(cmd, command_timeout))
+                value = re.sub(r"\s+", "", value)
+                if label == "iccid":
+                    value = value.rstrip("fF")
+                if value:
+                    self._at_cache[cmd] = value
+                    info[label] = value
+            except Exception:  # noqa: BLE001
+                pass
+
         for label, cmd in (("manufacturer", "AT+CGMI"),
                            ("model", "AT+CGMM"),
                            ("imei", "AT+CGSN"),

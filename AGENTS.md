@@ -230,3 +230,23 @@ ssh furios@10.15.19.82 'setsid XDG_RUNTIME_DIR=/run/user/32011 DBUS_SESSION_BUS_
 - [ ] Save AT command history to `~/.local/share/furimodem-tool/history`.
 - [ ] Consider packaging as a flatpak or a `.deb` once stable.
 - [ ] Consider a wrapper script in `~/.local/bin/` so the install path isn't pinned.
+
+## SIM switching (two physical SIMs)
+
+The MT6877 modem has two SIM interfaces and the phone has two cards. The
+switch is not exposed by oFono; it is done in the modem with:
+
+    AT+ESIMMAP=<sim_for_stack1>,<sim_for_stack2>   # (1,2)=SIM1, (2,1)=SIM2
+    AT+ESIMMAP?                                    # -> +ESIMMAP: 1
+
+`AT+ESLOTSINFO?` lists both slots (`+ESLOTSINFO: 2,"+CPIN: READY",...`).
+`AT+ESLOTSMAP` exists but rejects the mappings we tried; `AT+ESIMMAP` is
+the one the RIL uses and works live in ~10-15 s (`+CNVRM: 0` = NVRAM
+write). Implemented in `OfonoModem.set_active_sim()` and the "Active SIM"
+combo on the APN tab.
+
+Caveats:
+- oFono's SimManager keeps the previous card's IMSI/ICCID; the tool reads
+  them with `AT+CIMI` / `AT+ICCID` (and clears `_at_cache` after a switch).
+- The switch re-provisions the PDP contexts from the new SIM (APNs can
+  change) and the default route is re-installed; check data afterwards.

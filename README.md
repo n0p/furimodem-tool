@@ -13,7 +13,12 @@ native oFono interfaces:
   `AT+ECELLMEAS=1` / `AT+ECELL`.
 - **APN** — per-context APN edit (`ConnectionContext.SetProperty`),
   re-provision from `serviceproviders.xml` (`ProvisionContext`), and
-  confirm-guarded restarts of oFono / ModemManager.
+  confirm-guarded restarts of oFono / ModemManager. Includes **Active
+  SIM**: the modem has two physical SIMs; the dropdown switches between
+  them in place (~15 s) via `AT+ESIMMAP=1,2` / `2,1` (the modem maps its
+  stack to a physical SIM and writes NVRAM). IMSI/ICCID are read from
+  the modem with `AT+CIMI`/`AT+ICCID` because oFono keeps the card
+  identity cached from the previous SIM.
 - **Networks** — run any script from `/usr/share/ofono/scripts` against
   the selected modem; one-click operator scan (manual mode →
   `get-operators` polling → auto mode).
