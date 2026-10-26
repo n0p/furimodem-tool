@@ -188,18 +188,21 @@ class MainWindow(Adw.ApplicationWindow):
 
         status_page = self._build_status_page()
         apn_page = self._build_apn_page()
+        sa_page = self._build_5g_page()
         net_page = self._build_networks_page()
         mmcli_page = self._build_mmcli_page()
         terminal_page = self._build_terminal_page()
         logcat_page = self._build_logcat_page()
         self._view_stack.add_titled(status_page, "status", "Status")
         self._view_stack.add_titled(apn_page, "apn", "APN")
+        self._view_stack.add_titled(sa_page, "sa", "5G SA")
         self._view_stack.add_titled(net_page, "networks", "Networks")
         self._view_stack.add_titled(mmcli_page, "mmcli", "mmcli")
         self._view_stack.add_titled(terminal_page, "terminal", "Terminal")
         self._view_stack.add_titled(logcat_page, "logcat", "logcat")
         status_page.set_icon_name("network-cellular-signal-good-symbolic")
         apn_page.set_icon_name("network-workgroup-symbolic")
+        sa_page.set_icon_name("network-cellular-5g-symbolic")
         net_page.set_icon_name("network-cellular-connected-symbolic")
         mmcli_page.set_icon_name("system-search-symbolic")
         terminal_page.set_icon_name("utilities-terminal-symbolic")
@@ -665,6 +668,265 @@ class MainWindow(Adw.ApplicationWindow):
                           f"last: {cmd} -> exit {rc}")
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # --- 5G SA ---------------------------------------------------------------
+
+    def _build_5g_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage()
+        page.set_title("5G SA")
+
+        st = Adw.PreferencesGroup()
+        st.set_title("Estado")
+        st.set_description(
+            "Lectura directa del módem por el canal AT de oFono "
+            "(org.ofono.FuriLabs.AT). Las bandas vienen de mmcli.")
+        self._g5_rows: dict[str, Adw.ActionRow] = {}
+        for key in (
+            "RAT (AT+ERAT?)",
+            "Opciones 5G (AT+E5GOPT?)",
+            "Registro 5G (AT+C5GREG?)",
+            "Registro LTE (AT+CEREG?)",
+            "Operador (AT+COPS?)",
+            "Preferencia RAT (oFono)",
+            "Bandas NR (mmcli)",
+        ):
+            row = Adw.ActionRow()
+            row.set_title(key)
+            row.set_subtitle("—")
+            self._g5_rows[key] = row
+            st.add(row)
+
+        self._g5_status_row = Adw.ActionRow()
+        self._g5_status_row.set_title("Última acción")
+        self._g5_status_row.set_subtitle("idle")
+        st.add(self._g5_status_row)
+
+        refresh = Gtk.Button(label="Refresh")
+        refresh.connect("clicked", lambda *_: self._refresh_5g())
+        rrow = Adw.ActionRow()
+        rrow.set_activatable_widget(refresh)
+        rrow.add_suffix(refresh)
+        st.add(rrow)
+        page.add(st)
+
+        mode = Adw.PreferencesGroup()
+        mode.set_title("Modo de red")
+        mode.set_description(
+            "En este firmware AT+ERAT solo acepta 19 y 22; el resto devuelve "
+            "CME ERROR 4. El RIL de MTK usa 22. Si el módem se queda en "
+            "'allowed: 4g' no busca NR: aplica el modo y reinicia el RIL.")
+        mbtns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        mbtns.set_margin_top(8)
+        mbtns.set_margin_bottom(8)
+        for label, cmd, tip in (
+            ("ERAT=22", "AT+ERAT=22", "Valor que usa el RIL de MTK"),
+            ("ERAT=19", "AT+ERAT=19", "Valor histórico del banco GAIA"),
+            ("E5GOPT=7", "AT+E5GOPT=7", "Máscara de opciones 5G"),
+        ):
+            b = Gtk.Button(label=label)
+            b.set_tooltip_text(tip)
+            b.connect("clicked", lambda _b, c=cmd: self._run_at_5g(c))
+            mbtns.append(b)
+        rat_btn = Gtk.Button(label="RAT any")
+        rat_btn.set_tooltip_text(
+            "org.ofono.RadioSettings TechnologyPreference = any")
+        rat_btn.connect("clicked", lambda *_: self._set_rat_pref_5g("any"))
+        mbtns.append(rat_btn)
+        mrow = Adw.ActionRow()
+        mrow.set_activatable_widget(mbtns)
+        mrow.add_suffix(mbtns)
+        mode.add(mrow)
+
+        ril_btn = Gtk.Button(label="Restart RIL")
+        ril_btn.add_css_class("destructive-action")
+        ril_btn.set_tooltip_text("setprop vendor.ril.mtk.restart 1")
+        ril_btn.connect("clicked", lambda *_: self._confirm_run(
+            "Restart RIL?",
+            "setprop vendor.ril.mtk.restart 1\n"
+            "Reinicia rild + oFono; la sesión de datos se corta unos segundos.",
+            "setprop vendor.ril.mtk.restart 1"))
+        rrow2 = Adw.ActionRow()
+        rrow2.set_title("Reiniciar pila")
+        rrow2.set_activatable_widget(ril_btn)
+        rrow2.add_suffix(ril_btn)
+        mode.add(rrow2)
+        page.add(mode)
+
+        sel = Adw.PreferencesGroup()
+        sel.set_title("Selección de red")
+        sel.set_description(
+            "Registro manual en un PLMN. 'Register' deja que el módem elija "
+            "la RAT; 'LTE only' añade act=7 (E-UTRAN).")
+        self._g5_plmn_row = Adw.EntryRow()
+        self._g5_plmn_row.set_title("PLMN")
+        self._g5_plmn_row.set_text("99910")
+        sel.add(self._g5_plmn_row)
+
+        sbtns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        sbtns.set_margin_top(8)
+        sbtns.set_margin_bottom(8)
+        for label, tip, with_act in (
+            ("Register", 'AT+COPS=1,2,"<plmn>"', False),
+            ("LTE only", 'AT+COPS=1,2,"<plmn>",7', True),
+        ):
+            b = Gtk.Button(label=label)
+            b.set_tooltip_text(tip)
+            b.connect("clicked",
+                      lambda _b, a=with_act: self._register_plmn_5g(a))
+            sbtns.append(b)
+        auto = Gtk.Button(label="Auto")
+        auto.set_tooltip_text("AT+COPS=0")
+        auto.connect("clicked", lambda *_: self._run_at_5g("AT+COPS=0"))
+        sbtns.append(auto)
+        srow = Adw.ActionRow()
+        srow.set_activatable_widget(sbtns)
+        srow.add_suffix(sbtns)
+        sel.add(srow)
+        page.add(sel)
+
+        bands = Adw.PreferencesGroup()
+        bands.set_title("Bandas NR")
+        bands.set_description(
+            "AT+ENRCABAND=&lt;acción&gt;,&lt;banda&gt;; acción 1 añade la banda a "
+            "la lista NR del módem.")
+        self._g5_band_row = Adw.EntryRow()
+        self._g5_band_row.set_title("Banda NR (p.ej. 40)")
+        self._g5_band_row.set_text("40")
+        bands.add(self._g5_band_row)
+
+        bbtns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bbtns.set_margin_top(8)
+        bbtns.set_margin_bottom(8)
+        add_band = Gtk.Button(label="Añadir")
+        add_band.set_tooltip_text("AT+ENRCABAND=1,<banda>")
+        add_band.connect("clicked", lambda *_: self._add_nr_band_5g())
+        bbtns.append(add_band)
+        for band in ("40", "77", "78"):
+            b = Gtk.Button(label=f"n{band}")
+            b.set_tooltip_text(f"AT+ENRCABAND=1,{band}")
+            b.connect("clicked",
+                      lambda _b, n=band: self._run_at_5g(f"AT+ENRCABAND=1,{n}"))
+            bbtns.append(b)
+        brow = Adw.ActionRow()
+        brow.set_activatable_widget(bbtns)
+        brow.add_suffix(bbtns)
+        bands.add(brow)
+        page.add(bands)
+
+        return page
+
+    def _set_g5_status(self, text: str) -> None:
+        GLib.idle_add(self._g5_status_row.set_subtitle, text)
+
+    def _run_at_5g(self, cmd: str) -> None:
+        modem = self.modem
+        if modem is None:
+            self._set_g5_status("sin módem")
+            return
+        self._set_g5_status(f"TX {cmd}")
+        self._log(f"[5gsa] $ {cmd}", "tx")
+
+        def work():
+            try:
+                out = modem.command(cmd, timeout=25)
+            except Exception as e:  # noqa: BLE001
+                GLib.idle_add(self._log, f"[5gsa] error: {e}", "err")
+                GLib.idle_add(self._g5_status_row.set_subtitle, f"error: {e}")
+                return
+            body = (out or "").replace("\r", "").strip()
+            for line in body.splitlines():
+                if line.strip() and line.strip() != "OK":
+                    tag = "err" if ("ERROR" in line or "CME" in line) else "rx"
+                    GLib.idle_add(self._log, f"[5gsa] {line.strip()}", tag)
+            GLib.idle_add(self._g5_status_row.set_subtitle,
+                          f"{cmd} → {'ERROR' if 'ERROR' in body else 'ok'}")
+            self._refresh_5g()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _register_plmn_5g(self, with_act: bool) -> None:
+        plmn = self._g5_plmn_row.get_text().strip()
+        if not plmn:
+            self._set_g5_status("PLMN vacío")
+            return
+        cmd = f'AT+COPS=1,2,"{plmn}"' + (",7" if with_act else "")
+        self._run_at_5g(cmd)
+
+    def _add_nr_band_5g(self) -> None:
+        band = self._g5_band_row.get_text().strip()
+        if not band.isdigit():
+            self._set_g5_status("banda no válida")
+            return
+        self._run_at_5g(f"AT+ENRCABAND=1,{band}")
+
+    def _set_rat_pref_5g(self, value: str) -> None:
+        modem = self.modem
+        if modem is None:
+            self._set_g5_status("sin módem")
+            return
+        self._set_g5_status(f"RadioSettings TechnologyPreference={value}…")
+
+        def work():
+            try:
+                obj = self.bus.get_object(OFONO_BUS, modem.path)
+                iface = dbus.Interface(obj, "org.ofono.RadioSettings")
+                iface.SetProperty("TechnologyPreference", dbus.String(value))
+            except Exception as e:  # noqa: BLE001
+                GLib.idle_add(self._log, f"[5gsa] RAT pref error: {e}", "err")
+                GLib.idle_add(self._g5_status_row.set_subtitle, f"error: {e}")
+                return
+            GLib.idle_add(self._log,
+                          f"[5gsa] TechnologyPreference = {value}", "ok")
+            GLib.idle_add(self._g5_status_row.set_subtitle, "RAT pref aplicada")
+            self._refresh_5g()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_5g(self) -> None:
+        modem = self.modem
+        if modem is None:
+            return
+
+        def work():
+            def q(cmd: str, t: int = 8) -> str:
+                try:
+                    return modem.command(cmd, timeout=t).replace("\r", "").strip()
+                except Exception as e:  # noqa: BLE001
+                    return f"error: {e}"
+
+            vals = {
+                "RAT (AT+ERAT?)": q("AT+ERAT?"),
+                "Opciones 5G (AT+E5GOPT?)": q("AT+E5GOPT?"),
+                "Registro 5G (AT+C5GREG?)": q("AT+C5GREG?"),
+                "Registro LTE (AT+CEREG?)": q("AT+CEREG?"),
+                "Operador (AT+COPS?)": q("AT+COPS?"),
+            }
+            try:
+                obj = self.bus.get_object(OFONO_BUS, modem.path)
+                iface = dbus.Interface(obj, "org.ofono.RadioSettings")
+                props = iface.GetProperties()
+                vals["Preferencia RAT (oFono)"] = str(
+                    props.get("TechnologyPreference", "?"))
+            except Exception as e:  # noqa: BLE001
+                vals["Preferencia RAT (oFono)"] = f"error: {e}"
+            try:
+                import json as _json
+                proc = subprocess.run(
+                    ["mmcli", "-m", "0", "-J"],
+                    capture_output=True, text=True, timeout=10)
+                data = _json.loads(proc.stdout or "{}")
+                bands = data.get("modem", {}).get("generic", {}).get(
+                    "current-bands", []) or []
+                nr = [b for b in bands if str(b).startswith("ngran")]
+                vals["Bandas NR (mmcli)"] = ", ".join(nr) or "—"
+            except Exception as e:  # noqa: BLE001
+                vals["Bandas NR (mmcli)"] = f"error: {e}"
+
+            for key, val in vals.items():
+                text = " ".join(str(val).split())
+                GLib.idle_add(self._g5_rows[key].set_subtitle, text[:160] or "—")
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _build_networks_page(self) -> Adw.PreferencesPage:
         page = Adw.PreferencesPage()
@@ -1435,6 +1697,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._refresh_info()
             self._refresh_signal_info()
             self._refresh_apn_tab()
+            self._refresh_5g()
         except dbus.DBusException as e:
             self.modem = None
             self._log(f"[oFono] cannot open modem: {e}", "err")
