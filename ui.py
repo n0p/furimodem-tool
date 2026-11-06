@@ -714,7 +714,10 @@ class MainWindow(Adw.ApplicationWindow):
         mode.set_description(
             "En este firmware AT+ERAT solo acepta 19 y 22; el resto devuelve "
             "CME ERROR 4. El RIL de MTK usa 22. Si el módem se queda en "
-            "'allowed: 4g' no busca NR: aplica el modo y reinicia el RIL.")
+            "'allowed: 4g' no busca NR: aplica el modo y reinicia el RIL. "
+            "La preferencia RAT de oFono debe ser 'nr': con 'lte' el RIL "
+            "reaplica AT+ERAT=22 en cada resincronización y se pierde el 5G SA "
+            "(la herramienta la corrige sola al seleccionar el módem).")
         mbtns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         mbtns.set_margin_top(8)
         mbtns.set_margin_bottom(8)
@@ -727,15 +730,28 @@ class MainWindow(Adw.ApplicationWindow):
             b.set_tooltip_text(tip)
             b.connect("clicked", lambda _b, c=cmd: self._run_at_5g(c))
             mbtns.append(b)
-        rat_btn = Gtk.Button(label="RAT any")
+        rat_btn = Gtk.Button(label="RAT nr")
         rat_btn.set_tooltip_text(
-            "org.ofono.RadioSettings TechnologyPreference = any")
-        rat_btn.connect("clicked", lambda *_: self._set_rat_pref_5g("any"))
+            "org.ofono.RadioSettings TechnologyPreference = nr (5G SA)")
+        rat_btn.connect("clicked", lambda *_: self._set_rat_pref_5g("nr"))
         mbtns.append(rat_btn)
         mrow = Adw.ActionRow()
         mrow.set_activatable_widget(mbtns)
         mrow.add_suffix(mbtns)
         mode.add(mrow)
+
+        self._g5_rat_combo = Adw.ComboRow()
+        self._g5_rat_combo.set_title("Preferencia RAT (oFono)")
+        self._g5_rat_combo.set_subtitle(
+            "Debe ser 'nr'. Con 'lte' el RIL manda AT+ERAT=22 y se pierde 5G SA")
+        self._g5_rat_combo.set_model(
+            Gtk.StringList.new(["gsm", "umts", "lte", "nr"]))
+        self._g5_rat_combo.set_selected(3)
+        # conectar después del set_selected inicial: si no, dispara la acción
+        # con self.modem aún vacío al construir la página
+        self._g5_rat_combo.connect("notify::selected",
+                                   self._on_rat_combo_changed)
+        mode.add(self._g5_rat_combo)
 
         ril_btn = Gtk.Button(label="Restart RIL")
         ril_btn.add_css_class("destructive-action")
@@ -882,6 +898,28 @@ class MainWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _on_rat_combo_changed(self, row, _pspec) -> None:
+        model = row.get_model()
+        idx = row.get_selected()
+        if model is None or idx == Gtk.INVALID_LIST_POSITION:
+            return
+        value = model.get_string(idx)
+        if value:
+            self._set_rat_pref_5g(value)
+
+    def _sync_rat_combo(self, value: str) -> None:
+        row = getattr(self, "_g5_rat_combo", None)
+        if row is None or not value:
+            return
+        model = row.get_model()
+        if model is None:
+            return
+        for i in range(model.get_n_items()):
+            if model.get_string(i) == value:
+                if row.get_selected() != i:
+                    row.set_selected(i)
+                return
+
     def _refresh_5g(self) -> None:
         modem = self.modem
         if modem is None:
@@ -905,8 +943,17 @@ class MainWindow(Adw.ApplicationWindow):
                 obj = self.bus.get_object(OFONO_BUS, modem.path)
                 iface = dbus.Interface(obj, "org.ofono.RadioSettings")
                 props = iface.GetProperties()
-                vals["Preferencia RAT (oFono)"] = str(
-                    props.get("TechnologyPreference", "?"))
+                pref = str(props.get("TechnologyPreference", "?"))
+                vals["Preferencia RAT (oFono)"] = pref
+                GLib.idle_add(self._sync_rat_combo, pref)
+                if pref and pref != "?" and pref != "nr":
+                    GLib.idle_add(
+                        self._log,
+                        f"[5gsa] TechnologyPreference={pref}: el RIL mandará "
+                        "AT+ERAT=22 y no habrá 5G SA; se corrige a 'nr'", "err")
+                    if not getattr(self, "_rat_enforced", False):
+                        self._rat_enforced = True
+                        GLib.idle_add(self._set_rat_pref_5g, "nr")
             except Exception as e:  # noqa: BLE001
                 vals["Preferencia RAT (oFono)"] = f"error: {e}"
             try:
@@ -1697,6 +1744,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._refresh_info()
             self._refresh_signal_info()
             self._refresh_apn_tab()
+            self._rat_enforced = False  # revisar TechnologyPreference de nuevo
             self._refresh_5g()
         except dbus.DBusException as e:
             self.modem = None
